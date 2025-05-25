@@ -44,3 +44,4 @@ Rassemblement d'idées et de schémas pour la conception.
   - [ ] Recalbox : https://www.recalbox.com/
   - [ ] Lakka : https://www.lakka.tv/
 - [ ] Ajout des manettes
+- [ ] Ajout d'un port HDMI pour brancher sur un écran déporter ou videoproj
