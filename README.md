@@ -16,6 +16,8 @@ Rassemblement d'idées et de schémas pour la conception.
 - Bouton de déclenchement Bluetooth
 - Embase d’enceinte 35 mm (trou pour pied d’enceinte)
 - Multiprise 3 prises
+- Boitier en bois (conception et réalisation maison - thx les copain)
+- Logiciel Photobooth-app => https://photobooth-app.org/
 
 ## Liste d’idées à faire
 
@@ -34,6 +36,7 @@ Rassemblement d'idées et de schémas pour la conception.
   - [ ] Gérer le multiboot pour avoir un autre OS en parallèle, voir : https://blog.sbw.be/scips/2024/raspberry-pi-5-multiboot-on-nvme-ssd/434/
   - [ ] Copier l’OS SD vers NVMe, vérifier les partitions
   - [ ] Installation d’un OS de retro-gaming
+- [ ] Mettre à jour photobooth-app vers 7.1.0
 
 ## Retro-gaming
 
