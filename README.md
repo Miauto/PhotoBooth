@@ -24,6 +24,7 @@ Rassemblement d'idées et de schémas pour la conception.
 
 - [ ] Ajout d’un UPS pour simplifier la gestion de l’allumage et de l’extinction du photobooth
   - [ ] Choix du modèle, voir chez Geekworm X1200 : https://wiki.geekworm.com/X1200
+- [ ] Revoir la gestion d'impression
 - [ ] Ajout d’un port USB sur une façade
   - [x] Fiche USB installée
 - [ ] Ajout d’une prise d’alimentation type Powercon
