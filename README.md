@@ -19,7 +19,7 @@ Rassemblement d'idées et de schémas pour la conception.
 - Boitier en bois (conception et réalisation maison - thx les copain)
 - Logiciel Photobooth-app => https://photobooth-app.org/
 
-## Liste d’idées à faire
+## Liste d’idées
 
 - [ ] Ajout d’un UPS pour simplifier la gestion de l’allumage et de l’extinction du photobooth
   - [ ] Choix du modèle, voir chez Geekworm X1200 : https://wiki.geekworm.com/X1200
