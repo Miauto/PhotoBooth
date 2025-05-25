@@ -7,6 +7,7 @@ Rassemblement d'idées et de schémas pour la conception.
 - Raspberry Pi 5 - 8 Go de RAM
 - Carte NVMe - https://wiki.geekworm.com/X1001
 - NVMe WD Blue - 1 To
+- Boitier P579 => https://photobooth-app.org/
 - Écran 7" (Bug du tactile à l’allumage, un bouton permet de couper et rallumer l’écran)
 - Caméra Pi V3
 - LED RING 16 leds - piloté par ESP8266 sous WLED - connecté en USB
