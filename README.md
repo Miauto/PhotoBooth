@@ -40,7 +40,7 @@ Rassemblement d'idées et de schémas pour la conception.
   - [ ] Installation d’un OS de retro-gaming
 - [ ] Mettre à jour photobooth-app vers 7.1.0
 - [ ] Revoir la conception du bouton bluetooth sur batterie, pourquoi pas une pedale, sinon gros bouton
-  - [ ] https://amzn.eu/d/6wawQ6z
+  - [ ] idée autre : https://amzn.eu/d/6wawQ6z / bouton champignon (j'ai)
   - [ ] gestion et accès recharge batterie
   - [ ] solide
   - [ ] bouton On/Off
