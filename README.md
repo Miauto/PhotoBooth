@@ -7,6 +7,7 @@ Rassemblement d'idées et de schémas pour la conception.
 - Raspberry Pi 5 - 8 Go de RAM
 - Carte NVMe - https://wiki.geekworm.com/X1001
 - NVMe WD Blue - 1 To
+- Onduleur X1200 : https://wiki.geekworm.com/X1200
 - Boitier P579 => https://photobooth-app.org/
 - Écran 7" (Bug du tactile à l’allumage, un bouton permet de couper et rallumer l’écran)
 - Caméra Pi V3
@@ -22,8 +23,10 @@ Rassemblement d'idées et de schémas pour la conception.
 
 ## Liste d’idées
 
-- [ ] Ajout d’un UPS pour simplifier la gestion de l’allumage et de l’extinction du photobooth
-  - [ ] Choix du modèle, voir chez Geekworm X1200 : https://wiki.geekworm.com/X1200
+- [x] Ajout d’un UPS pour simplifier la gestion de l’allumage et de l’extinction du photobooth
+  - [x] Choix du modèle, voir chez Geekworm X1200 : https://wiki.geekworm.com/X1200
+  - [x] ajout d'un script d'extinction en l'absence de tension (10s)
+  - [x] allumage a la mise sous tension
 - [ ] Revoir la gestion d'impression
 - [ ] Ajout d’un port USB sur une façade
   - [x] Fiche USB installée
@@ -31,12 +34,11 @@ Rassemblement d'idées et de schémas pour la conception.
   - [x] Fiche en façade
   - [ ] Câble d’alimentation
 - [ ] Ajout d’un support pour la caméra
-  - [x] Support imprimé
+  - [ ] Support imprimé
 - [ ] Ajout d’une serrure
 - [ ] Ajout d’un NVMe
   - [x] Matériel installé
-  - [ ] Gérer le multiboot pour avoir un autre OS en parallèle, voir : https://blog.sbw.be/scips/2024/raspberry-pi-5-multiboot-on-nvme-ssd/434/
-  - [ ] Copier l’OS SD vers NVMe, vérifier les partitions
+  - [ ] Gérer le multiboot pour avoir un autre OS en parallèle, voir : https://raspberrytips.fr/dual-boot-raspberry-pi/
   - [ ] Installation d’un OS de retro-gaming
 - [ ] Mettre à jour photobooth-app vers 7.1.0
 - [ ] Revoir la conception du bouton bluetooth sur batterie, pourquoi pas une pedale, sinon gros bouton
