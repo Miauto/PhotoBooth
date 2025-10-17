@@ -1,0 +1,17 @@
+[Unit]
+Description=UPS Monitor (UPS Shield X1200/X1201/X1202)
+After=multi-user.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/local/bin/ups_monitor.py
+Restart=on-failure
+RestartSec=5
+# Exécuter en root pour pouvoir arrêter le système et accéder au GPIO
+User=root
+# écrire sortie dans le fichier de logs géré par le script (ou journal)
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
