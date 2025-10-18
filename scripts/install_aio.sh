@@ -99,8 +99,9 @@ def get_active_gui_session():
     """
     Retourne (user, display, xauth, uid) de la session graphique active,
     ou (None, None, None, None) si introuvable.
-    Utilise loginctl si disponible, sinon who.
+    Heuristiques : loginctl -> fallback detection pour Raspberry Pi OS via X0 + processus utilisateurs.
     """
+    # 1) try loginctl (systemd)
     try:
         if shutil.which('loginctl'):
             out = subprocess.check_output(['loginctl', 'list-sessions', '--no-legend'], text=True)
@@ -113,12 +114,12 @@ def get_active_gui_session():
                 propd = {}
                 for p in props.splitlines():
                     if '=' in p:
-                        k,v = p.split('=',1)
+                        k, v = p.split('=', 1)
                         propd[k] = v
-                active = propd.get('Active','no').lower()
-                sess_type = propd.get('Type','').lower()
-                display = propd.get('Display','').strip()
-                if active == 'yes' and (sess_type in ('x11','wayland') or display):
+                active = propd.get('Active', 'no').lower()
+                sess_type = propd.get('Type', '').lower()
+                display = propd.get('Display', '').strip()
+                if active == 'yes' and (sess_type in ('x11', 'wayland') or display):
                     user = propd.get('Name')
                     uid = propd.get('UID')
                     try:
@@ -128,7 +129,7 @@ def get_active_gui_session():
                     display = display or os.environ.get('DISPLAY', ':0')
                     xauth = os.path.join('/home', user, '.Xauthority')
                     if not os.path.exists(xauth):
-                        # try run-time dir as fallback (Wayland)
+                        # fallback to run-time dir for Wayland or missing .Xauthority
                         if uid:
                             xauth = os.path.join('/run', 'user', str(uid), '')
                         else:
@@ -137,36 +138,79 @@ def get_active_gui_session():
     except Exception:
         logging.debug("loginctl detection failed", exc_info=True)
 
-    # fallback: who :0
+    # 2) fallback specific for Raspberry Pi OS / X11 : if X0 exists try to find owning user by looking for desktop processes
     try:
-        for line in subprocess.check_output(['who'], text=True).splitlines():
-            cols = line.split()
-            if len(cols) >= 2 and cols[1].startswith(':'):
-                user = cols[0]
-                display = cols[1]
-                try:
-                    import pwd
-                    uid = pwd.getpwnam(user).pw_uid
-                except Exception:
-                    uid = None
-                xauth = os.path.join('/home', user, '.Xauthority')
-                return (user, display, xauth, uid)
+        if os.path.exists('/tmp/.X11-unix/X0'):
+            # try who first
+            try:
+                for line in subprocess.check_output(['who'], text=True).splitlines():
+                    cols = line.split()
+                    if len(cols) >= 2 and cols[1].startswith(':0'):
+                        user = cols[0]
+                        try:
+                            import pwd
+                            uid = pwd.getpwnam(user).pw_uid
+                        except Exception:
+                            uid = None
+                        display = ':0'
+                        xauth = os.path.join('/home', user, '.Xauthority')
+                        return (user, display, xauth, uid)
+            except Exception:
+                pass
+
+            # otherwise heuristics: scan ps for common desktop/session processes run by non-root users
+            try:
+                procs = subprocess.check_output(['ps', '-eo', 'uid,user,cmd'], text=True)
+                candidates = []
+                for pline in procs.splitlines():
+                    cols = pline.strip().split(None, 2)
+                    if len(cols) < 3:
+                        continue
+                    uid_s, user, cmd = cols
+                    if user in ('root','systemd','message+'):
+                        continue
+                    cmd_l = cmd.lower()
+                    if any(k in cmd_l for k in ('lxsession','lxpanel','openbox','startlxde','lightdm','x-session-manager','xinit','xfce4-session','gnome-session','mate-session','kdeinit')):
+                        candidates.append((int(uid_s), user))
+                if candidates:
+                    # prefer lowest UID recent candidate
+                    uid, user = candidates[0]
+                    display = ':0'
+                    xauth = os.path.join('/home', user, '.Xauthority')
+                    return (user, display, xauth, uid)
+            except Exception:
+                logging.debug("process-based GUI detection failed", exc_info=True)
     except Exception:
-        logging.debug("who fallback failed", exc_info=True)
+        pass
+
+    # 3) last resort: try common user 'pi'
+    try:
+        if os.path.exists('/home/pi'):
+            xauth = '/home/pi/.Xauthority'
+            uid = None
+            try:
+                import pwd
+                uid = pwd.getpwnam('pi').pw_uid
+            except Exception:
+                uid = None
+            display = os.environ.get('DISPLAY', ':0')
+            return ('pi', display, xauth, uid)
+    except Exception:
+        pass
 
     return (None, None, None, None)
 
 def _run_as_user(user, env_vars, cmd):
     """
-    Lance cmd (list) en tant que user via sudo -u, injecte env_vars.
+    Lance cmd (list) en tant que user via sudo -u -H, injecte env_vars.
     Retourne subprocess.CompletedProcess ou None si erreur.
     """
     env_args = []
-    for k,v in (env_vars or {}).items():
+    for k, v in (env_vars or {}).items():
         if v is None:
             continue
         env_args.append(f"{k}={v}")
-    full = ['sudo', '-u', user, 'env'] + env_args + cmd
+    full = ['sudo', '-u', user, '-H', 'env'] + env_args + cmd
     logging.debug("Lancement commande pour l'utilisateur graphique: %s", shlex.join(full))
     try:
         return subprocess.run(full, check=False)
