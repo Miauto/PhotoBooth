@@ -3,6 +3,7 @@ set -euo pipefail
 
 SERVICE_NAME=ups_monitor
 DEST_SCRIPT=/usr/local/bin/ups_monitor.py
+PROMPT_SCRIPT=/usr/local/bin/ups_touch_prompt.py
 UNIT_FILE=/etc/systemd/system/${SERVICE_NAME}.service
 LOG_DIR=/var/log/ups_monitor
 
@@ -10,8 +11,8 @@ LOG_DIR=/var/log/ups_monitor
 REQUEST_RETRY_DELAY=2      # secondes entre tentatives
 REQUEST_RETRY_TIMEOUT=300  # timeout total en secondes (0 = infinie)
 
-# paquets utiles pour les popups / gestion fenêtre
-GUI_PACKAGES="yad zenity wmctrl xdotool"
+# paquets utiles pour les popups / gestion fenêtre (Tkinter pour l'interface tactile)
+GUI_PACKAGES="python3-tk"
 
 if [[ $EUID -ne 0 ]]; then
   echo "Ce script doit être exécuté en root. Réessayez avec sudo:"
@@ -28,10 +29,79 @@ else
   echo "apt-get non disponible — merci d'installer manuellement: ${GUI_PACKAGES}"
 fi
 
-echo "Installation du script -> ${DEST_SCRIPT}"
+echo "Installation du prompt tactile -> ${PROMPT_SCRIPT}"
+cat > "${PROMPT_SCRIPT}" <<'PY'
+#!/usr/bin/env python3
+"""
+Prompt tactile Tkinter.
+Sortie: exit 0 -> ÉTEINDRE, exit 1 -> RESTER ALLUMÉ
+Doit être exécuté dans la session graphique (DISPLAY/XAUTHORITY fournis via l'environnement).
+"""
+import sys
+import tkinter as tk
+
+def main():
+    root = tk.Tk()
+    root.attributes('-topmost', True)
+    root.title("Perte de l'alimentation !")
+    root.overrideredirect(True)
+
+    # centered window, not fullscreen (adapt to screen)
+    w = root.winfo_screenwidth()
+    h = root.winfo_screenheight()
+    win_w = min(900, w - 80)
+    win_h = min(700, h - 80)
+    x = (w - win_w) // 2
+    y = (h - win_h) // 2
+    root.geometry(f"{win_w}x{win_h}+{x}+{y}")
+
+    bg = tk.Frame(root, bg='#111111')
+    bg.pack(fill='both', expand=True)
+
+    # Title two lines centered
+    title = tk.Label(bg, text="Perte de l'alimentation !\nVoulez-vous :", 
+                     fg='white', bg='#111111', justify='center',
+                     font=('Sans', 36, 'bold'))
+    title.pack(pady=(30,20))
+
+    # Buttons stacked vertically, large and colored, not side-by-side
+    btn_font = ('Sans', 30, 'bold')
+    # Éteindre (red)
+    def do_shutdown():
+        root.quit()
+        root.destroy()
+        sys.exit(0)
+    btn_shutdown = tk.Button(bg, text="ÉTEINDRE", command=do_shutdown,
+                             fg='white', bg='#c62828', activebackground='#b71c1c',
+                             font=btn_font, width=20, height=2, bd=0)
+    btn_shutdown.pack(pady=(20,16))
+
+    # Rester allumé (green)
+    def do_stay_on():
+        root.quit()
+        root.destroy()
+        sys.exit(1)
+    btn_stay = tk.Button(bg, text="RESTER ALLUMÉ", command=do_stay_on,
+                         fg='white', bg='#2e7d32', activebackground='#1b5e20',
+                         font=btn_font, width=20, height=2, bd=0)
+    btn_stay.pack(pady=(0,30))
+
+    # Prevent accidental close
+    root.protocol("WM_DELETE_WINDOW", lambda: None)
+    root.focus_force()
+    root.mainloop()
+    # fallback -> consider as stay on
+    sys.exit(1)
+
+if __name__ == '__main__':
+    main()
+PY
+chmod 0755 "${PROMPT_SCRIPT}"
+
+echo "Installation du script monitor -> ${DEST_SCRIPT}"
 cat > "${DEST_SCRIPT}" <<'PY'
 #!/usr/bin/env python3
-# Ce script Python est uniquement adapté pour les modules UPS Shield X1200, X1201 et X1202
+# ups_monitor.py - surveille GPIO et affiche prompt tactile via ups_touch_prompt.py
 
 import gpiod
 import time
@@ -47,417 +117,196 @@ import shlex
 # Configuration
 PLD_PIN = 6
 CHIP_NAME = 'gpiochip4'
-DEBOUNCE_SEC = 10    # attendre 10s pour confirmer la coupure
-CHECK_INTERVAL = 0.2 # pause en fonctionnement normal
-PROMPT_TIMEOUT = 30  # valeur par défaut (mais on appelle prompt avec timeout=0 pour rester ouvert)
-PRE_PROMPT_SEC = 5   # temporisation avant d'afficher le prompt (évite popups instantanés)
+DEBOUNCE_SEC = 10
+CHECK_INTERVAL = 0.2
+PROMPT_TIMEOUT = 0    # 0 => GUI reste ouverte jusqu'à réponse (le monitor tue le dialog si secteur revient)
+PRE_PROMPT_SEC = 5
 
-# Mode de test / autorisation d'extinction
-ALLOW_SHUTDOWN = False           # mettre True pour réellement appeler 'shutdown'
-# possibilité d'overrider via variable d'environnement (UPM_ALLOW_SHUTDOWN=1)
+ALLOW_SHUTDOWN = False
 if os.environ.get('UPM_ALLOW_SHUTDOWN', '').lower() in ('1', 'true', 'yes'):
     ALLOW_SHUTDOWN = True
 
-# Log file portable : root -> /var/log/ups_monitor/ups_monitor.log, sinon -> ~/.local/share/ups_monitor/ups_monitor.log
 if os.geteuid() == 0:
     LOG_DIR = '/var/log/ups_monitor'
 else:
     LOG_DIR = os.path.expanduser('~/.local/share/ups_monitor')
-
 os.makedirs(LOG_DIR, exist_ok=True)
 LOG_FILE = os.path.join(LOG_DIR, 'ups_monitor.log')
 
-# config logger with rotation
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
-
-file_handler = logging.handlers.RotatingFileHandler(
-    LOG_FILE, maxBytes=5 * 1024 * 1024, backupCount=5, encoding='utf-8'
-)
-file_formatter = logging.Formatter('%(asctime)s [%(levelname)s] %(message)s')
-file_handler.setFormatter(file_formatter)
-logger.addHandler(file_handler)
-
-# also stream to stderr for console visibility
-stream_handler = logging.StreamHandler(sys.stderr)
-stream_handler.setFormatter(file_formatter)
-logger.addHandler(stream_handler)
+fh = logging.handlers.RotatingFileHandler(LOG_FILE, maxBytes=5*1024*1024, backupCount=5, encoding='utf-8')
+fmt = logging.Formatter('%(asctime)s [%(levelname)s] %(message)s')
+fh.setFormatter(fmt)
+logger.addHandler(fh)
+sh = logging.StreamHandler(sys.stderr)
+sh.setFormatter(fmt)
+logger.addHandler(sh)
 
 def shutdown_now():
-    logging.info("shutdown_now() appelé, ALLOW_SHUTDOWN=%s", ALLOW_SHUTDOWN)
+    logging.info("shutdown_now() ALLOW_SHUTDOWN=%s", ALLOW_SHUTDOWN)
     if not ALLOW_SHUTDOWN:
-        logging.info("Extinction supprimée - mode test. (aucune commande shutdown exécutée)")
-        print("Extinction supprimée - mode test.", file=sys.stderr)
+        logging.info("Mode test: pas d'extinction exécutée")
+        print("Mode test: pas d'extinction exécutée", file=sys.stderr)
         return
     try:
-        logging.info("Exécution de la commande shutdown (systemctl --no-block poweroff)")
         subprocess.run(['/bin/systemctl', '--no-block', 'poweroff'], check=False)
-    except Exception as e:
-        logging.exception("Erreur lancement shutdown: %s", e)
-        print("Erreur lancement shutdown:", e, file=sys.stderr)
+    except Exception:
+        logging.exception("Erreur lors du shutdown")
 
 def get_active_gui_session():
-    """
-    Retourne (user, display, xauth, uid) de la session graphique active,
-    ou (None, None, None, None) si introuvable.
-    Heuristiques : loginctl -> fallback detection pour Raspberry Pi OS via X0 + processus utilisateurs.
-    """
-    # 1) try loginctl (systemd)
     try:
         if shutil.which('loginctl'):
-            out = subprocess.check_output(['loginctl', 'list-sessions', '--no-legend'], text=True)
+            out = subprocess.check_output(['loginctl','list-sessions','--no-legend'], text=True)
             for line in out.splitlines():
                 parts = line.split()
                 if not parts:
                     continue
                 sess = parts[0]
-                props = subprocess.check_output(['loginctl', 'show-session', sess, '--property=Active', '--property=Display', '--property=Type', '--property=Name', '--property=UID'], text=True)
-                propd = {}
+                props = subprocess.check_output(['loginctl','show-session',sess,'--property=Active','--property=Display','--property=Type','--property=Name','--property=UID'], text=True)
+                d = {}
                 for p in props.splitlines():
                     if '=' in p:
-                        k, v = p.split('=', 1)
-                        propd[k] = v
-                active = propd.get('Active', 'no').lower()
-                sess_type = propd.get('Type', '').lower()
-                display = propd.get('Display', '').strip()
-                if active == 'yes' and (sess_type in ('x11', 'wayland') or display):
-                    user = propd.get('Name')
-                    uid = propd.get('UID')
+                        k,v = p.split('=',1)
+                        d[k]=v
+                if d.get('Active','no').lower()=='yes':
+                    user=d.get('Name')
+                    uid=d.get('UID')
                     try:
-                        uid = int(uid)
+                        uid=int(uid)
                     except Exception:
-                        uid = None
-                    display = display or os.environ.get('DISPLAY', ':0')
+                        uid=None
+                    display = d.get('Display') or os.environ.get('DISPLAY',':0')
                     xauth = os.path.join('/home', user, '.Xauthority')
                     if not os.path.exists(xauth):
-                        # fallback to run-time dir for Wayland or missing .Xauthority
-                        if uid:
-                            xauth = os.path.join('/run', 'user', str(uid), '')
-                        else:
-                            xauth = ''
+                        xauth = os.path.join('/run','user',str(uid)) if uid else ''
                     return (user, display, xauth, uid)
     except Exception:
-        logging.debug("loginctl detection failed", exc_info=True)
+        logging.debug("loginctl failed", exc_info=True)
 
-    # 2) fallback specific for Raspberry Pi OS / X11 : if X0 exists try to find owning user by looking for desktop processes
-    try:
-        if os.path.exists('/tmp/.X11-unix/X0'):
-            # try who first
-            try:
-                for line in subprocess.check_output(['who'], text=True).splitlines():
-                    cols = line.split()
-                    if len(cols) >= 2 and cols[1].startswith(':0'):
-                        user = cols[0]
-                        try:
-                            import pwd
-                            uid = pwd.getpwnam(user).pw_uid
-                        except Exception:
-                            uid = None
-                        display = ':0'
-                        xauth = os.path.join('/home', user, '.Xauthority')
-                        return (user, display, xauth, uid)
-            except Exception:
-                pass
-
-            # otherwise heuristics: scan ps for common desktop/session processes run by non-root users
-            try:
-                procs = subprocess.check_output(['ps', '-eo', 'uid,user,cmd'], text=True)
-                candidates = []
-                for pline in procs.splitlines():
-                    cols = pline.strip().split(None, 2)
-                    if len(cols) < 3:
-                        continue
-                    uid_s, user, cmd = cols
-                    if user in ('root','systemd','message+'):
-                        continue
-                    cmd_l = cmd.lower()
-                    if any(k in cmd_l for k in ('lxsession','lxpanel','openbox','startlxde','lightdm','x-session-manager','xinit','xfce4-session','gnome-session','mate-session','kdeinit')):
-                        candidates.append((int(uid_s), user))
-                if candidates:
-                    # prefer lowest UID recent candidate
-                    uid, user = candidates[0]
-                    display = ':0'
-                    xauth = os.path.join('/home', user, '.Xauthority')
-                    return (user, display, xauth, uid)
-            except Exception:
-                logging.debug("process-based GUI detection failed", exc_info=True)
-    except Exception:
-        pass
-
-    # 3) last resort: try common user 'pi'
-    try:
-        if os.path.exists('/home/pi'):
-            xauth = '/home/pi/.Xauthority'
+    # fallback simple
+    if os.path.exists('/home/pi'):
+        try:
+            import pwd
+            uid = pwd.getpwnam('pi').pw_uid
+        except Exception:
             uid = None
-            try:
-                import pwd
-                uid = pwd.getpwnam('pi').pw_uid
-            except Exception:
-                uid = None
-            display = os.environ.get('DISPLAY', ':0')
-            return ('pi', display, xauth, uid)
-    except Exception:
-        pass
-
+        return ('pi', os.environ.get('DISPLAY',':0'), '/home/pi/.Xauthority', uid)
     return (None, None, None, None)
 
 def _popen_as_user(user, env_vars, cmd):
-    """
-    Lance cmd (list) en tant que user via sudo -u -H env ..., retourne subprocess.Popen ou None.
-    """
     env_args = []
-    for k, v in (env_vars or {}).items():
+    for k,v in (env_vars or {}).items():
         if v is None:
             continue
         env_args.append(f"{k}={v}")
-    full = ['sudo', '-u', user, '-H', 'env'] + env_args + cmd
-    logging.debug("Popen pour l'utilisateur graphique: %s", shlex.join(full))
+    full = ['sudo','-u',user,'-H','env'] + env_args + cmd
+    logging.debug("Lancement commande utilisateur: %s", shlex.join(full))
     try:
         return subprocess.Popen(full)
     except Exception:
         logging.exception("Erreur Popen en tant que user %s", user)
         return None
 
-def _run_as_user(user, env_vars, cmd):
-    """
-    Lance cmd (list) en tant que user via sudo -u -H env..., retourne CompletedProcess ou None.
-    """
-    env_args = []
-    for k, v in (env_vars or {}).items():
-        if v is None:
-            continue
-        env_args.append(f"{k}={v}")
-    full = ['sudo', '-u', user, '-H', 'env'] + env_args + cmd
-    logging.debug("Lancement commande pour l'utilisateur graphique: %s", shlex.join(full))
-    try:
-        return subprocess.run(full, check=False)
-    except Exception:
-        logging.exception("Erreur exécution commande en tant que user %s", user)
-        return None
-
 def prompt_shutdown_confirmation(timeout=PROMPT_TIMEOUT, power_check=None, poll_interval=0.25):
     """
-    Retourne True pour confirmer l'arrêt (Oui), False sinon.
-    power_check: callable() -> True si secteur OK.
-    GUI: si timeout==0 la fenêtre reste ouverte jusqu'à réponse (mais sera tuée si secteur revient).
-    Console: timeout>0 => auto-YES, timeout==0 => attente indéfinie (si interactive).
+    Lance le prompt tactile (Tkinter) et attend réponse.
+    Si power_check() retourne True pendant le prompt, le dialog est tué et la fonction retourne False.
+    Retourne True si l'utilisateur choisit ÉTEINDRE, False si RESTER ALLUMÉ ou si killed.
     """
-    logging.info("Affichage du prompt de confirmation (timeout=%ss)", timeout)
+    logging.info("Affichage prompt tactile (timeout=%s)", timeout)
     gui_user, gui_display, gui_xauth, gui_uid = get_active_gui_session()
-    logging.debug("Session graphique détectée: user=%s display=%s xauth=%s uid=%s", gui_user, gui_display, gui_xauth, gui_uid)
-
-    def _safety_deadline(start):
-        if timeout and timeout > 0:
-            return start + timeout + 5
-        return None
-
-    # 1) yad (préféré) - design tactile: gros texte, gros boutons, undecorated
-    yad = shutil.which('yad')
-    if yad and gui_user:
-        text = "<span face='Sans' size='xx-large'><b>Alimentation secteur perdue\n\nArrêter la machine ?</b></span>"
-        cmd = [
-            yad,
-            '--title', 'Alimentation perdue',
-            '--text', text,
-            '--button=Rester allumé:1',
-            '--button=Éteindre:0',
-            '--on-top', '--center',
-            '--borders=20',
-            '--fontname=Sans Bold 36',
-            '--undecorated'
-        ]
-        # n'ajouter --timeout pour GUI si timeout==0 => la fenêtre reste ouverte
-        if timeout and timeout > 0:
-            cmd += ['--timeout', str(timeout)]
-        env = {'DISPLAY': gui_display, 'XAUTHORITY': gui_xauth, 'XDG_RUNTIME_DIR': f'/run/user/{gui_uid}' if gui_uid else None}
-        proc = _popen_as_user(gui_user, env, cmd)
-        if proc:
-            start = time.time()
-            deadline = _safety_deadline(start)
+    logging.debug("Session graphique: %s %s %s %s", gui_user, gui_display, gui_xauth, gui_uid)
+    if not gui_user:
+        logging.warning("Aucune session graphique trouvée -> fallback console")
+        # console fallback
+        if sys.stdin.isatty():
             try:
-                while True:
-                    # si secteur revenu, kill dialog et annuler
-                    if power_check and power_check():
-                        logging.info("Secteur revenu pendant prompt -> kill dialog et annuler l'arrêt")
-                        try:
-                            proc.kill()
-                        except Exception:
-                            pass
-                        return False
-                    ret = proc.poll()
-                    if ret is not None:
-                        logging.debug("yad finished rc=%s", ret)
-                        # yad returns 0 for the first button (Éteindre:0), 1 for second (Rester allumé)
-                        if ret == 0:
-                            return True
-                        if ret in (1,):
-                            return False
-                        # handle possible timeout codes as YES for safety if configured
-                        if ret in (252, 5):
-                            logging.info("Dialog yad timeout -> considérer comme OUI")
-                            return True
-                        return False
-                    # si on a une deadline, la respecter ; sinon laisser la fenêtre ouverte
-                    if deadline and time.time() > deadline:
-                        logging.info("Dialog exceeded safety deadline -> considérer comme OUI")
-                        try:
-                            proc.kill()
-                        except Exception:
-                            pass
-                        return True
-                    time.sleep(poll_interval)
-            finally:
-                try:
-                    if proc.poll() is None:
-                        proc.kill()
-                except Exception:
-                    pass
-
-    # 2) zenity fallback (run as user via sudo -u)
-    zenity = shutil.which('zenity')
-    if zenity and gui_user:
-        cmd = [
-            zenity, '--question',
-            '--title', 'Alimentation perdue',
-            '--text', 'Alimentation secteur perdue. Arrêter la machine ?',
-            '--ok-label', 'Éteindre', '--cancel-label', 'Rester allumé'
-        ]
-        if timeout and timeout > 0:
-            cmd += ['--timeout', str(timeout)]
-        env = {'DISPLAY': gui_display, 'XAUTHORITY': gui_xauth, 'XDG_RUNTIME_DIR': f'/run/user/{gui_uid}' if gui_uid else None}
-        proc = _popen_as_user(gui_user, env, cmd)
-        if proc:
-            start = time.time()
-            deadline = _safety_deadline(start)
-            try:
-                while True:
-                    if power_check and power_check():
-                        logging.info("Secteur revenu pendant prompt -> kill dialog et annuler l'arrêt")
-                        try:
-                            proc.kill()
-                        except Exception:
-                            pass
-                        return False
-                    ret = proc.poll()
-                    if ret is not None:
-                        logging.debug("zenity finished rc=%s", ret)
-                        if ret == 0:
-                            return True
-                        if ret in (1,):  # cancel -> rester allumé
-                            return False
-                        if ret in (5,):
-                            logging.info("Dialog zenity timeout -> considérer comme OUI")
-                            return True
-                        return False
-                    if deadline and time.time() > deadline:
-                        logging.info("Dialog exceeded safety deadline -> considérer comme OUI")
-                        try:
-                            proc.kill()
-                        except Exception:
-                            pass
-                        return True
-                    time.sleep(poll_interval)
-            finally:
-                try:
-                    if proc.poll() is None:
-                        proc.kill()
-                except Exception:
-                    pass
-
-    # 3) console fallback: if interactive, use alarm (timeout => YES). If no TTY, do NOT auto-YES.
-    if sys.stdin.isatty():
-        logging.info("Aucun affichage graphique -> prompt console (interactive)")
-        try:
-            def _alarm_handler(signum, frame):
-                raise TimeoutError
-            prev = signal.getsignal(signal.SIGALRM)
-            if timeout and timeout > 0:
-                signal.signal(signal.SIGALRM, _alarm_handler)
-                signal.alarm(timeout)
-            try:
-                ans = input(f"Alimentation perdue. Arrêter la machine ? [Y/n] " + (f"(auto-YES dans {timeout}s): " if timeout and timeout > 0 else "(réponse requise): ")).strip().lower()
-                if timeout and timeout > 0:
-                    signal.alarm(0)
-                    signal.signal(signal.SIGALRM, prev)
-                return ans in ('', 'y', 'yes', 'o', 'oui')
-            except TimeoutError:
-                logging.info("Prompt console timeout -> considérer comme OUI")
-                if timeout and timeout > 0:
-                    signal.signal(signal.SIGALRM, prev)
-                return True
-            except EOFError:
-                logging.info("Pas de stdin -> annulation")
-                if timeout and timeout > 0:
-                    signal.signal(signal.SIGALRM, prev)
-                return False
-        finally:
-            try:
-                if timeout and timeout > 0:
-                    signal.alarm(0)
+                ans = input("Alimentation perdue. Arrêter la machine ? [Y/n]: ").strip().lower()
+                return ans in ('','y','yes','o','oui')
             except Exception:
-                pass
+                return False
+        return False
 
-    logging.warning("Pas de GUI et pas de TTY -> annulation (pas d'auto-YES)")
-    return False
-
-def main():
-    logging.info("Démarrage ups_monitor (LOG_FILE=%s, ALLOW_SHUTDOWN=%s)", LOG_FILE, ALLOW_SHUTDOWN)
+    prompt_path = "/usr/local/bin/ups_touch_prompt.py"
+    cmd = ['/usr/bin/python3', prompt_path]
+    env = {'DISPLAY': gui_display, 'XAUTHORITY': gui_xauth, 'XDG_RUNTIME_DIR': f'/run/user/{gui_uid}' if gui_uid else None}
+    proc = _popen_as_user(gui_user, env, cmd)
+    if not proc:
+        logging.warning("Impossible de lancer le prompt tactile pour %s", gui_user)
+        return False
 
     try:
+        start = time.time()
+        while True:
+            # if power returns -> kill prompt and cancel shutdown
+            if power_check and power_check():
+                logging.info("Secteur revenu pendant prompt -> kill dialog et annuler")
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+                return False
+            ret = proc.poll()
+            if ret is not None:
+                logging.debug("Prompt terminé rc=%s", ret)
+                # ups_touch_prompt: 0 = shutdown, 1 = stay on
+                return True if ret == 0 else False
+            time.sleep(poll_interval)
+    finally:
+        try:
+            if proc.poll() is None:
+                proc.kill()
+        except Exception:
+            pass
+
+def main():
+    logging.info("Démarrage ups_monitor (LOG=%s)", LOG_FILE)
+    try:
         chip = gpiod.Chip(CHIP_NAME)
-    except Exception as e:
-        logging.exception("Impossible d'ouvrir le chip GPIO: %s", e)
-        print("Impossible d'ouvrir le chip GPIO:", e, file=sys.stderr)
+    except Exception:
+        logging.exception("Impossible d'ouvrir chip GPIO")
+        print("Impossible d'ouvrir chip GPIO", file=sys.stderr)
         sys.exit(1)
 
     try:
         line = chip.get_line(PLD_PIN)
-    except Exception as e:
-        logging.exception("Impossible de récupérer la ligne GPIO: %s", e)
-        print("Impossible de récupérer la ligne GPIO:", e, file=sys.stderr)
+    except Exception:
+        logging.exception("Impossible de récupérer la ligne GPIO")
+        print("Impossible de récupérer la ligne GPIO", file=sys.stderr)
         try:
             chip.close()
         except Exception:
             pass
         sys.exit(1)
 
-    # Paramètres de retry injectés par le script d'installation
-    request_retry_delay = __REQUEST_RETRY_DELAY__    # secondes entre tentatives
-    request_retry_timeout = __REQUEST_RETRY_TIMEOUT__  # secondes au total avant abandon (0 = infini)
+    # retry params injected by installer
+    request_retry_delay = __REQUEST_RETRY_DELAY__
+    request_retry_timeout = __REQUEST_RETRY_TIMEOUT__
 
-    # nouvel état : si True on a choisi "rester allumé" et on attend le retour du secteur
     snoozed_until_restore = False
 
     start_time = time.time()
     while True:
         try:
             line.request(consumer="PLD", type=gpiod.LINE_REQ_DIR_IN)
-            logging.info("Ligne GPIO %s réservée avec succès.", PLD_PIN)
+            logging.info("Ligne GPIO réservée")
             break
         except OSError as e:
             elapsed = time.time() - start_time
             if request_retry_timeout and elapsed >= request_retry_timeout:
-                logging.error("Timeout après %.1fs lors de la réservation de la ligne GPIO: %s", elapsed, e)
-                print("Timeout réservation ligne GPIO (voir log).", file=sys.stderr)
+                logging.error("Timeout réservation ligne GPIO")
                 try:
                     chip.close()
                 except Exception:
                     pass
                 sys.exit(1)
-            logging.warning("Impossible de réserver la ligne GPIO (occupée). Reessayer dans %.1fs : %s", request_retry_delay, e)
+            logging.warning("Réessayer réservation ligne GPIO dans %.1fs", request_retry_delay)
             time.sleep(request_retry_delay)
             continue
-        except Exception as e:
-            logging.exception("Erreur lors de la réservation de la ligne GPIO: %s", e)
-            print("Erreur lors de la réservation de la ligne GPIO:", e, file=sys.stderr)
-            try:
-                chip.close()
-            except Exception:
-                pass
-            sys.exit(1)
 
     def cleanup(signum=None, frame=None):
-        logging.info("Cleanup signal reçu (%s). Libération ressources.", signum)
+        logging.info("Cleanup")
         try:
             line.release()
         except Exception:
@@ -475,86 +324,74 @@ def main():
         while True:
             try:
                 val = line.get_value()
-            except Exception as e:
-                logging.exception("Erreur lecture GPIO: %s", e)
-                print("Erreur lecture GPIO:", e, file=sys.stderr)
+            except Exception:
+                logging.exception("Erreur lecture GPIO")
                 break
 
             if val == 1:
-                # alimentation secteur OK
+                # secteur OK -> clear snooze if any
                 if snoozed_until_restore:
-                    logging.info("Secteur revenu -> réactivation des prompts (était en pause après choix 'rester allumé').")
+                    logging.info("Secteur revenu -> reprise normale (snooze clear).")
                     snoozed_until_restore = False
                 time.sleep(CHECK_INTERVAL)
                 continue
 
-            # perte secteur détectée -> debounce
-            logging.info("Signal perte secteur détecté, attente debounce %s s", DEBOUNCE_SEC)
+            # detected loss -> debounce
+            logging.info("Perte secteur détectée -> debounce %ss", DEBOUNCE_SEC)
             time.sleep(DEBOUNCE_SEC)
             try:
                 if line.get_value() != 1:
-                    # si l'utilisateur a snoozé (choisi "rester allumé"), ne pas réafficher le prompt tant que secteur pas revenu
                     if snoozed_until_restore:
-                        logging.info("Prompts en pause (utilisateur a choisi de rester allumé) — attente retour secteur.")
-                        # boucle d'attente légère jusqu'au retour secteur
+                        logging.info("Prompts en pause (utilisateur a choisi de rester allumé). Attente retour secteur.")
                         while True:
                             try:
                                 if line.get_value() == 1:
-                                    logging.info("Secteur revenu -> reprise normale (snooze clear).")
+                                    logging.info("Secteur revenu -> reprise (clear snooze)")
                                     snoozed_until_restore = False
                                     break
                             except Exception:
-                                logging.exception("Erreur lecture GPIO pendant snooze, sortie.")
+                                logging.exception("Erreur lecture GPIO pendant snooze")
                                 cleanup()
                             time.sleep(CHECK_INTERVAL)
                         continue
 
-                    logging.info("Perte secteur confirmée, attente pré-prompt %ss", PRE_PROMPT_SEC)
-                    # courte temporisation avant popup pour confirmer état (annule si secteur revient)
+                    # pre-prompt confirmation
+                    logging.info("Attente pré-prompt %ss", PRE_PROMPT_SEC)
                     t0 = time.time()
                     cancelled = False
                     while time.time() - t0 < PRE_PROMPT_SEC:
                         if line.get_value() == 1:
-                            logging.info("Secteur revenu pendant pré-prompt -> annulation affichage")
+                            logging.info("Secteur revenu pendant pré-prompt -> annulation")
                             cancelled = True
                             break
                         time.sleep(0.2)
                     if cancelled:
-                        continue  # retour à la boucle de surveillance
+                        continue
 
-                    logging.info("Affichage du prompt de confirmation.")
-                    print("Perte secteur confirmée, affichage du prompt de confirmation.", file=sys.stderr)
-
-                    # la GUI doit rester ouverte jusqu'à réponse -> passer timeout=0 (aucun --timeout ajouté)
-                    # power_check permet de tuer le dialog si le secteur revient pendant la question
+                    logging.info("Affichage du prompt tactile")
                     ok = prompt_shutdown_confirmation(timeout=0, power_check=lambda: line.get_value() == 1)
                     if ok:
                         shutdown_now()
-                        # si shutdown lancé, on peut quitter
                         break
                     else:
-                        logging.info("Utilisateur a choisi de rester allumé -> mise en pause des prompts jusqu'au retour du secteur.")
-                        # activer la pause : ne plus reproposer tant que le secteur n'est pas revenu
+                        logging.info("Utilisateur a choisi de rester allumé -> mise en snooze jusqu'au retour du secteur")
                         snoozed_until_restore = True
-                        # attendre proprement le retour du secteur avant de reprendre (empêche réapparition du prompt)
                         while True:
                             try:
                                 if line.get_value() == 1:
-                                    logging.info("Secteur revenu après snooze -> reprise de la surveillance.")
+                                    logging.info("Secteur revenu après snooze -> reprise")
                                     snoozed_until_restore = False
                                     break
                             except Exception:
-                                logging.exception("Erreur lecture GPIO pendant snooze, sortie.")
+                                logging.exception("Erreur lecture GPIO pendant snooze")
                                 cleanup()
                             time.sleep(CHECK_INTERVAL)
                         continue
                 else:
-                    logging.info("Faux positif: alimentation revenue pendant le debounce.")
-            except Exception as e:
-                logging.exception("Erreur relecture GPIO: %s", e)
-                print("Erreur relecture GPIO:", e, file=sys.stderr)
+                    logging.info("Faux positif: secteur revenu pendant debounce")
+            except Exception:
+                logging.exception("Erreur boucle surveillance")
                 break
-
     finally:
         cleanup()
 
@@ -580,7 +417,6 @@ ExecStart=/usr/bin/python3 /usr/local/bin/ups_monitor.py
 Restart=on-failure
 RestartSec=5
 User=root
-# Environment=UPM_ALLOW_SHUTDOWN=1   # disabled by default - enable explicitly if you want auto shutdown
 StandardOutput=journal
 StandardError=journal
 
