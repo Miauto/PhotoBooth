@@ -122,7 +122,7 @@ CHECK_INTERVAL = 0.2
 PROMPT_TIMEOUT = 0    # 0 => GUI reste ouverte jusqu'à réponse (le monitor tue le dialog si secteur revient)
 PRE_PROMPT_SEC = 5
 
-ALLOW_SHUTDOWN = False
+ALLOW_SHUTDOWN = True
 if os.environ.get('UPM_ALLOW_SHUTDOWN', '').lower() in ('1', 'true', 'yes'):
     ALLOW_SHUTDOWN = True
 
