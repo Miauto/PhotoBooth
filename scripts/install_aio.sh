@@ -505,4 +505,61 @@ def main():
                         # activer la pause : ne plus reproposer tant que le secteur n'est pas revenu
                         snoozed_until_restore = True
                         # continuer la surveillance (sans réafficher le prompt tant que snoozed_until_restore==True)
-   
+                        continue
+                else:
+                    logging.info("Faux positif: alimentation revenue pendant le debounce.")
+            except Exception as e:
+                logging.exception("Erreur relecture GPIO: %s", e)
+                print("Erreur relecture GPIO:", e, file=sys.stderr)
+                break
+
+    finally:
+        cleanup()
+
+if __name__ == '__main__':
+    main()
+PY
+
+# remplacer les placeholders par les valeurs shell (évite expansion dans le here-doc)
+sed -i "s/__REQUEST_RETRY_DELAY__/${REQUEST_RETRY_DELAY}/g" "${DEST_SCRIPT}"
+sed -i "s/__REQUEST_RETRY_TIMEOUT__/${REQUEST_RETRY_TIMEOUT}/g" "${DEST_SCRIPT}"
+
+chmod 0755 "${DEST_SCRIPT}"
+
+echo "Création du fichier unit systemd -> ${UNIT_FILE}"
+cat > "${UNIT_FILE}" <<'UNIT'
+[Unit]
+Description=UPS Monitor (UPS Shield X1200/X1201/X1202)
+After=multi-user.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/local/bin/ups_monitor.py
+Restart=on-failure
+RestartSec=5
+User=root
+# Environment=UPM_ALLOW_SHUTDOWN=1   # disabled by default - enable explicitly if you want auto shutdown
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+echo "Création du dossier de logs ${LOG_DIR}"
+mkdir -p "${LOG_DIR}"
+chown root:root "${LOG_DIR}" || true
+chmod 0755 "${LOG_DIR}"
+
+echo "Reload systemd, enable et start du service ${SERVICE_NAME}"
+systemctl daemon-reload
+systemctl enable --now ${SERVICE_NAME}.service || true
+
+echo "Installation terminée. Status du service :"
+systemctl status ${SERVICE_NAME}.service --no-pager || true
+
+echo
+echo "Logs (journal):"
+echo "  sudo journalctl -u ${SERVICE_NAME}.service -f"
+echo
+echo "Fichier de log (si exécuté en root): ${LOG_DIR}/ups_monitor.log"
