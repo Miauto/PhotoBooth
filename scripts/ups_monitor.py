@@ -9,6 +9,7 @@ import signal
 import logging
 import logging.handlers
 import os
+import shutil
 
 # Configuration
 PLD_PIN = 6
@@ -60,6 +61,84 @@ def shutdown_now():
     except Exception as e:
         logging.exception("Erreur lancement shutdown: %s", e)
         print("Erreur lancement shutdown:", e, file=sys.stderr)
+
+def prompt_shutdown_confirmation(timeout=30):
+    """
+    Retourne True pour confirmer l'arrêt (Oui), False pour annuler.
+    Essaie d'abord une UI GTK (zenity), puis yad, puis console avec timeout.
+    Le timeout est interprété comme OUI.
+    """
+    logging.info("Affichage du prompt de confirmation (timeout=%ss)", timeout)
+
+    # 1) zenity (GTK)
+    zenity = shutil.which('zenity')
+    if zenity and os.environ.get('DISPLAY'):
+        try:
+            proc = subprocess.run([
+                zenity, '--question',
+                '--title', 'Alimentation perdue',
+                '--text', 'Alimentation secteur perdue. Arrêter la machine ?',
+                '--ok-label', 'Oui', '--cancel-label', 'Non',
+                '--timeout', str(timeout)
+            ], timeout=timeout + 5)
+            # zenity: 0=OK, 1=Cancel, 5=timeout
+            if proc.returncode == 0:
+                return True
+            if proc.returncode == 5:
+                logging.info("Dialog zenity timeout -> considérer comme OUI")
+                return True
+            return False
+        except Exception:
+            logging.exception("Erreur lancement zenity, fallback...")
+
+    # 2) yad (si présent)
+    yad = shutil.which('yad')
+    if yad and os.environ.get('DISPLAY'):
+        try:
+            proc = subprocess.run([
+                yad, '--width=420', '--height=160',
+                '--title', 'Alimentation perdue',
+                '--text', 'Alimentation secteur perdue. Arrêter la machine ?',
+                '--button=Oui:0', '--button=Non:1',
+                '--timeout', str(timeout)
+            ], timeout=timeout + 5)
+            # yad: 0=Oui, 1=Non, 252=timeout (varie selon version) -> traiter timeout comme Oui
+            if proc.returncode == 0:
+                return True
+            if proc.returncode in (252, 5):
+                logging.info("Dialog yad timeout -> considérer comme OUI")
+                return True
+            return False
+        except Exception:
+            logging.exception("Erreur lancement yad, fallback...")
+
+    # 3) Console fallback (input avec alarm). Timeout => OUI. EOF (pas de stdin) => OUI.
+    try:
+        def _alarm_handler(signum, frame):
+            raise TimeoutError
+        prev_handler = signal.getsignal(signal.SIGALRM)
+        signal.signal(signal.SIGALRM, _alarm_handler)
+        signal.alarm(timeout)
+        try:
+            ans = input(f"Alimentation perdue. Arrêter la machine ? [Y/n] (auto-YES dans {timeout}s): ").strip().lower()
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, prev_handler)
+            if ans in ('', 'y', 'yes', 'o', 'oui'):
+                return True
+            return False
+        except TimeoutError:
+            logging.info("Prompt console timeout -> considérer comme OUI")
+            signal.signal(signal.SIGALRM, prev_handler)
+            return True
+        except EOFError:
+            logging.info("Pas de stdin disponible -> considérer comme OUI")
+            signal.signal(signal.SIGALRM, prev_handler)
+            return True
+    finally:
+        try:
+            signal.alarm(0)
+        except Exception:
+            pass
 
 def main():
     logging.info("Démarrage ups_monitor (LOG_FILE=%s, ALLOW_SHUTDOWN=%s)", LOG_FILE, ALLOW_SHUTDOWN)
@@ -118,7 +197,10 @@ def main():
                 if line.get_value() != 1:
                     logging.info("Perte secteur confirmée, arrêt système demandé.")
                     print("Perte secteur confirmée, arrêt système.", file=sys.stderr)
-                    shutdown_now()
+                    if prompt_shutdown_confirmation(timeout=30):
+                        shutdown_now()
+                    else:
+                        logging.info("Arrêt annulé par l'utilisateur via le prompt.")
                     break
                 else:
                     logging.info("Faux positif: alimentation revenue pendant le debounce.")
