@@ -330,8 +330,8 @@ def main():
         sys.exit(1)
 
     # Paramètres de retry injectés par le script d'installation
-    request_retry_delay = ${REQUEST_RETRY_DELAY}    # secondes entre tentatives
-    request_retry_timeout = ${REQUEST_RETRY_TIMEOUT}  # secondes au total avant abandon (0 = infini)
+    request_retry_delay = __REQUEST_RETRY_DELAY__    # secondes entre tentatives
+    request_retry_timeout = __REQUEST_RETRY_TIMEOUT__  # secondes au total avant abandon (0 = infini)
 
     start_time = time.time()
     while True:
@@ -415,6 +415,10 @@ def main():
 if __name__ == '__main__':
     main()
 PY
+
+# remplacer les placeholders par les valeurs shell (évite expansion dans le here-doc)
+sed -i "s/__REQUEST_RETRY_DELAY__/${REQUEST_RETRY_DELAY}/g" "${DEST_SCRIPT}"
+sed -i "s/__REQUEST_RETRY_TIMEOUT__/${REQUEST_RETRY_TIMEOUT}/g" "${DEST_SCRIPT}"
 
 chmod 0755 "${DEST_SCRIPT}"
 
