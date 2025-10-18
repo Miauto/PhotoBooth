@@ -49,7 +49,7 @@ PLD_PIN = 6
 CHIP_NAME = 'gpiochip4'
 DEBOUNCE_SEC = 10    # attendre 10s pour confirmer la coupure
 CHECK_INTERVAL = 0.2 # pause en fonctionnement normal
-PROMPT_TIMEOUT = 30  # secondes pour la popup (timeout = OUI)
+PROMPT_TIMEOUT = 30  # valeur par défaut (mais on appelle prompt avec timeout=0 pour rester ouvert)
 PRE_PROMPT_SEC = 5   # temporisation avant d'afficher le prompt (évite popups instantanés)
 
 # Mode de test / autorisation d'extinction
@@ -287,8 +287,12 @@ def prompt_shutdown_confirmation(timeout=PROMPT_TIMEOUT, power_check=None, poll_
                     ret = proc.poll()
                     if ret is not None:
                         logging.debug("yad finished rc=%s", ret)
+                        # yad returns 0 for the first button (Éteindre:0), 1 for second (Rester allumé)
                         if ret == 0:
                             return True
+                        if ret in (1,):
+                            return False
+                        # handle possible timeout codes as YES for safety if configured
                         if ret in (252, 5):
                             logging.info("Dialog yad timeout -> considérer comme OUI")
                             return True
@@ -339,6 +343,8 @@ def prompt_shutdown_confirmation(timeout=PROMPT_TIMEOUT, power_check=None, poll_
                         logging.debug("zenity finished rc=%s", ret)
                         if ret == 0:
                             return True
+                        if ret in (1,):  # cancel -> rester allumé
+                            return False
                         if ret in (5,):
                             logging.info("Dialog zenity timeout -> considérer comme OUI")
                             return True
@@ -358,14 +364,13 @@ def prompt_shutdown_confirmation(timeout=PROMPT_TIMEOUT, power_check=None, poll_
                 except Exception:
                     pass
 
-    # 3) console fallback: si TTY -> comportement précédent (timeout==0 => attente)
+    # 3) console fallback: if interactive, use alarm (timeout => YES). If no TTY, do NOT auto-YES.
     if sys.stdin.isatty():
         logging.info("Aucun affichage graphique -> prompt console (interactive)")
         try:
             def _alarm_handler(signum, frame):
                 raise TimeoutError
-            prev = signal.getsignal(signal.SIGALRM')
-            # si timeout>0 utiliser alarm, sinon blocage indéfini
+            prev = signal.getsignal(signal.SIGALRM)
             if timeout and timeout > 0:
                 signal.signal(signal.SIGALRM, _alarm_handler)
                 signal.alarm(timeout)
@@ -492,9 +497,16 @@ def main():
                     if snoozed_until_restore:
                         logging.info("Prompts en pause (utilisateur a choisi de rester allumé) — attente retour secteur.")
                         # boucle d'attente légère jusqu'au retour secteur
-                        while line.get_value() != 1:
+                        while True:
+                            try:
+                                if line.get_value() == 1:
+                                    logging.info("Secteur revenu -> reprise normale (snooze clear).")
+                                    snoozed_until_restore = False
+                                    break
+                            except Exception:
+                                logging.exception("Erreur lecture GPIO pendant snooze, sortie.")
+                                cleanup()
                             time.sleep(CHECK_INTERVAL)
-                        # au retour secteur la variable sera remise à False en tête de boucle
                         continue
 
                     logging.info("Perte secteur confirmée, attente pré-prompt %ss", PRE_PROMPT_SEC)
@@ -512,8 +524,10 @@ def main():
 
                     logging.info("Affichage du prompt de confirmation.")
                     print("Perte secteur confirmée, affichage du prompt de confirmation.", file=sys.stderr)
-                    # la fonction va tuer le dialog si secteur revient
-                    ok = prompt_shutdown_confirmation(timeout=PROMPT_TIMEOUT, power_check=lambda: line.get_value() == 1)
+
+                    # la GUI doit rester ouverte jusqu'à réponse -> passer timeout=0 (aucun --timeout ajouté)
+                    # power_check permet de tuer le dialog si le secteur revient pendant la question
+                    ok = prompt_shutdown_confirmation(timeout=0, power_check=lambda: line.get_value() == 1)
                     if ok:
                         shutdown_now()
                         # si shutdown lancé, on peut quitter
@@ -522,7 +536,17 @@ def main():
                         logging.info("Utilisateur a choisi de rester allumé -> mise en pause des prompts jusqu'au retour du secteur.")
                         # activer la pause : ne plus reproposer tant que le secteur n'est pas revenu
                         snoozed_until_restore = True
-                        # continuer la surveillance (sans réafficher le prompt tant que snoozed_until_restore==True)
+                        # attendre proprement le retour du secteur avant de reprendre (empêche réapparition du prompt)
+                        while True:
+                            try:
+                                if line.get_value() == 1:
+                                    logging.info("Secteur revenu après snooze -> reprise de la surveillance.")
+                                    snoozed_until_restore = False
+                                    break
+                            except Exception:
+                                logging.exception("Erreur lecture GPIO pendant snooze, sortie.")
+                                cleanup()
+                            time.sleep(CHECK_INTERVAL)
                         continue
                 else:
                     logging.info("Faux positif: alimentation revenue pendant le debounce.")
@@ -539,8 +563,8 @@ if __name__ == '__main__':
 PY
 
 # remplacer les placeholders par les valeurs shell (évite expansion dans le here-doc)
-sed -i "s/__REQUEST_RETRY_DELAY__/${REQUEST_RETRY_DELAY}/g" "${DEST_SCRIPT}"
-sed -i "s/__REQUEST_RETRY_TIMEOUT__/${REQUEST_RETRY_TIMEOUT}/g" "${DEST_SCRIPT}"
+sed -i "s/__REQUEST_RETRY_DELAY__/${REQUEST_RETRY_DELAY}/g" "${DEST_SCRIPT}" 2>/dev/null || true
+sed -i "s/__REQUEST_RETRY_TIMEOUT__/${REQUEST_RETRY_TIMEOUT}/g" "${DEST_SCRIPT}" 2>/dev/null || true
 
 chmod 0755 "${DEST_SCRIPT}"
 
