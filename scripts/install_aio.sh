@@ -411,6 +411,9 @@ def main():
     request_retry_delay = __REQUEST_RETRY_DELAY__    # secondes entre tentatives
     request_retry_timeout = __REQUEST_RETRY_TIMEOUT__  # secondes au total avant abandon (0 = infini)
 
+    # nouvel état : si True on a choisi "rester allumé" et on attend le retour du secteur
+    snoozed_until_restore = False
+
     start_time = time.time()
     while True:
         try:
@@ -465,6 +468,9 @@ def main():
 
             if val == 1:
                 # alimentation secteur OK
+                if snoozed_until_restore:
+                    logging.info("Secteur revenu -> réactivation des prompts (était en pause après choix 'rester allumé').")
+                    snoozed_until_restore = False
                 time.sleep(CHECK_INTERVAL)
                 continue
 
@@ -495,63 +501,8 @@ def main():
                         # si shutdown lancé, on peut quitter
                         break
                     else:
-                        logging.info("Utilisateur a choisi de rester allumé ou prompt annulé. Continuer la surveillance.")
-                        # ne pas break : continuer la surveillance et reposer la question lors d'une nouvelle coupure
-                        continue
-                else:
-                    logging.info("Faux positif: alimentation revenue pendant le debounce.")
-            except Exception as e:
-                logging.exception("Erreur relecture GPIO: %s", e)
-                print("Erreur relecture GPIO:", e, file=sys.stderr)
-                break
-
-    finally:
-        cleanup()
-
-if __name__ == '__main__':
-    main()
-PY
-
-# remplacer les placeholders par les valeurs shell (évite expansion dans le here-doc)
-sed -i "s/__REQUEST_RETRY_DELAY__/${REQUEST_RETRY_DELAY}/g" "${DEST_SCRIPT}"
-sed -i "s/__REQUEST_RETRY_TIMEOUT__/${REQUEST_RETRY_TIMEOUT}/g" "${DEST_SCRIPT}"
-
-chmod 0755 "${DEST_SCRIPT}"
-
-echo "Création du fichier unit systemd -> ${UNIT_FILE}"
-cat > "${UNIT_FILE}" <<'UNIT'
-[Unit]
-Description=UPS Monitor (UPS Shield X1200/X1201/X1202)
-After=multi-user.target
-
-[Service]
-Type=simple
-ExecStart=/usr/bin/python3 /usr/local/bin/ups_monitor.py
-Restart=on-failure
-RestartSec=5
-User=root
-# Environment=UPM_ALLOW_SHUTDOWN=1   # disabled by default - enable explicitly if you want auto shutdown
-StandardOutput=journal
-StandardError=journal
-
-[Install]
-WantedBy=multi-user.target
-UNIT
-
-echo "Création du dossier de logs ${LOG_DIR}"
-mkdir -p "${LOG_DIR}"
-chown root:root "${LOG_DIR}"
-chmod 0755 "${LOG_DIR}"
-
-echo "Reload systemd, enable et start du service ${SERVICE_NAME}"
-systemctl daemon-reload
-systemctl enable --now ${SERVICE_NAME}.service
-
-echo "Installation terminée. Status du service :"
-systemctl status ${SERVICE_NAME}.service --no-pager
-
-echo
-echo "Logs (journal):"
-echo "  sudo journalctl -u ${SERVICE_NAME}.service -f"
-echo
-echo "Fichier de log (si exécuté en root): ${LOG_DIR}/ups_monitor.log"
+                        logging.info("Utilisateur a choisi de rester allumé -> mise en pause des prompts jusqu'au retour du secteur.")
+                        # activer la pause : ne plus reproposer tant que le secteur n'est pas revenu
+                        snoozed_until_restore = True
+                        # continuer la surveillance (sans réafficher le prompt tant que snoozed_until_restore==True)
+   
