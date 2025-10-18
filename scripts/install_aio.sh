@@ -97,11 +97,10 @@ def shutdown_now():
 
 def get_active_gui_session():
     """
-    Tente de détecter la session graphique active et retourne:
-      (user, display, xauthority_path) ou (None, None, None)
-    Utilise loginctl si disponible, sinon heuristiques (who / :0).
+    Retourne (user, display, xauth, uid) de la session graphique active,
+    ou (None, None, None, None) si introuvable.
+    Utilise loginctl si disponible, sinon who.
     """
-    # Prefer loginctl
     try:
         if shutil.which('loginctl'):
             out = subprocess.check_output(['loginctl', 'list-sessions', '--no-legend'], text=True)
@@ -110,50 +109,62 @@ def get_active_gui_session():
                 if not parts:
                     continue
                 sess = parts[0]
-                props = subprocess.check_output(['loginctl', 'show-session', sess, '--property=Active', '--property=Display', '--property=Type', '--property=Name'], text=True)
+                props = subprocess.check_output(['loginctl', 'show-session', sess, '--property=Active', '--property=Display', '--property=Type', '--property=Name', '--property=UID'], text=True)
                 propd = {}
                 for p in props.splitlines():
                     if '=' in p:
                         k,v = p.split('=',1)
                         propd[k] = v
-                if propd.get('Active','no').lower() == 'yes' and propd.get('Type','').lower() in ('x11','wayland') or propd.get('Display'):
+                active = propd.get('Active','no').lower()
+                sess_type = propd.get('Type','').lower()
+                display = propd.get('Display','').strip()
+                if active == 'yes' and (sess_type in ('x11','wayland') or display):
                     user = propd.get('Name')
-                    display = propd.get('Display') or os.environ.get('DISPLAY', ':0')
+                    uid = propd.get('UID')
+                    try:
+                        uid = int(uid)
+                    except Exception:
+                        uid = None
+                    display = display or os.environ.get('DISPLAY', ':0')
                     xauth = os.path.join('/home', user, '.Xauthority')
                     if not os.path.exists(xauth):
-                        xauth = os.path.join('/run', 'user', str(get_uid(user)), 'wayland-0') if False else xauth
-                    return (user, display, xauth)
+                        # try run-time dir as fallback (Wayland)
+                        if uid:
+                            xauth = os.path.join('/run', 'user', str(uid), '')
+                        else:
+                            xauth = ''
+                    return (user, display, xauth, uid)
     except Exception:
-        pass
+        logging.debug("loginctl detection failed", exc_info=True)
 
-    # fallback: who on :0
+    # fallback: who :0
     try:
         for line in subprocess.check_output(['who'], text=True).splitlines():
             cols = line.split()
             if len(cols) >= 2 and cols[1].startswith(':'):
                 user = cols[0]
                 display = cols[1]
+                try:
+                    import pwd
+                    uid = pwd.getpwnam(user).pw_uid
+                except Exception:
+                    uid = None
                 xauth = os.path.join('/home', user, '.Xauthority')
-                return (user, display, xauth)
+                return (user, display, xauth, uid)
     except Exception:
-        pass
+        logging.debug("who fallback failed", exc_info=True)
 
-    return (None, None, None)
-
-def get_uid(username):
-    try:
-        import pwd
-        return pwd.getpwnam(username).pw_uid
-    except Exception:
-        return None
+    return (None, None, None, None)
 
 def _run_as_user(user, env_vars, cmd):
     """
-    Exécute cmd (list) en tant que user en utilisant sudo -u (root peut le faire).
-    env_vars dict ajoutés via 'env' wrapper pour sudo compatibility.
+    Lance cmd (list) en tant que user via sudo -u, injecte env_vars.
+    Retourne subprocess.CompletedProcess ou None si erreur.
     """
     env_args = []
-    for k,v in env_vars.items():
+    for k,v in (env_vars or {}).items():
+        if v is None:
+            continue
         env_args.append(f"{k}={v}")
     full = ['sudo', '-u', user, 'env'] + env_args + cmd
     logging.debug("Lancement commande pour l'utilisateur graphique: %s", shlex.join(full))
@@ -165,134 +176,93 @@ def _run_as_user(user, env_vars, cmd):
 
 def prompt_shutdown_confirmation(timeout=30):
     """
-    Retourne True pour confirmer l'arrêt (Oui), False pour annuler.
-    Essaie yad (avec --on-top), puis zenity (bring-to-front), en priorité dans
-    la session graphique active si détectée. Fallback console avec timeout.
-    Le timeout est interprété comme OUI.
+    Retourne True pour confirmer l'arrêt (Oui), False sinon.
+    Essaie yad puis zenity dans la session graphique active si détectée.
+    Si aucune session graphique : si stdin est un TTY affiche prompt console avec timeout,
+    sinon NE PAS auto-YES (retour False).
+    Timeout est interprété comme OUI pour les dialogs graphiques et console.
     """
     logging.info("Affichage du prompt de confirmation (timeout=%ss)", timeout)
-    gui_user, gui_display, gui_xauth = get_active_gui_session()
-    logging.debug("Session graphique détectée: user=%s display=%s xauth=%s", gui_user, gui_display, gui_xauth)
+    gui_user, gui_display, gui_xauth, gui_uid = get_active_gui_session()
+    logging.debug("Session graphique détectée: user=%s display=%s xauth=%s uid=%s", gui_user, gui_display, gui_xauth, gui_uid)
 
-    # 1) yad (préféré : supporte on-top / center)
+    # helper to interpret return codes
+    def _is_yes_rc(rc, tool):
+        if tool == 'yad':
+            return rc == 0
+        if tool == 'zenity':
+            return rc == 0
+        return False
+
+    # 1) yad (préféré)
     yad = shutil.which('yad')
-    if yad:
+    if yad and gui_user:
         cmd = [
-            yad,
-            '--width=480', '--height=160',
+            yad, '--width=480', '--height=160',
             '--title', 'Alimentation perdue',
             '--text', 'Alimentation secteur perdue. Arrêter la machine ?',
             '--button=Oui:0', '--button=Non:1',
             '--on-top', '--center',
             '--timeout', str(timeout)
         ]
-        if gui_user and gui_display:
-            env = {'DISPLAY': gui_display, 'XAUTHORITY': gui_xauth}
-            res = _run_as_user(gui_user, env, cmd)
-            if res is not None:
-                rc = res.returncode
-                if rc == 0:
-                    return True
-                if rc in (252,5):
-                    logging.info("Dialog yad timeout -> considérer comme OUI")
-                    return True
-                return False
-        elif os.environ.get('DISPLAY'):
-            try:
-                proc = subprocess.run(cmd, timeout=timeout+5)
-                if proc.returncode == 0:
-                    return True
-                if proc.returncode in (252,5):
-                    logging.info("Dialog yad timeout -> considérer comme OUI")
-                    return True
-                return False
-            except Exception:
-                logging.exception("Erreur lancement yad, fallback...")
-
-    # 2) zenity : lancer et tenter bring-to-front
-    zenity = shutil.which('zenity')
-    if zenity:
-        cmd = [
-            zenity, '--question',
-            '--title', 'Alimentation perdue',
-            '--text', 'Alimentation secteur perdue. Arrêter la machine ?',
-            '--ok-label', 'Oui', '--cancel-label', 'Non',
-            '--timeout', str(timeout)
-        ]
-        if gui_user and gui_display:
-            env = {'DISPLAY': gui_display, 'XAUTHORITY': gui_xauth}
-            # run zenity as gui user
-            res = _run_as_user(gui_user, env, cmd)
-            if res is not None:
-                rc = res.returncode
-                if rc == 0:
-                    return True
-                if rc in (5,):
-                    logging.info("Dialog zenity timeout -> considérer comme OUI")
-                    return True
-                return False
-        elif os.environ.get('DISPLAY'):
-            try:
-                p = subprocess.Popen(cmd)
-                time.sleep(0.2)
-                title = 'Alimentation perdue'
-                if shutil.which('wmctrl'):
-                    try:
-                        subprocess.run(['wmctrl', '-r', title, '-b', 'add,above'], check=False)
-                    except Exception:
-                        pass
-                elif shutil.which('xdotool'):
-                    try:
-                        out = subprocess.run(['xdotool', 'search', '--name', title], capture_output=True, text=True)
-                        for wid in out.stdout.splitlines():
-                            subprocess.run(['xdotool', 'windowactivate', '--sync', wid], check=False)
-                    except Exception:
-                        pass
-                try:
-                    ret = p.wait(timeout=timeout+5)
-                except subprocess.TimeoutExpired:
-                    logging.info("Dialog zenity timeout -> considérer comme OUI")
-                    try:
-                        p.kill()
-                    except Exception:
-                        pass
-                    return True
-                if ret == 0:
-                    return True
-                if ret == 5:
-                    logging.info("Dialog zenity timeout code -> considérer comme OUI")
-                    return True
-                return False
-            except Exception:
-                logging.exception("Erreur lancement zenity, fallback...")
-
-    # 3) Console fallback (input avec alarm). Timeout => OUI. EOF => OUI.
-    try:
-        def _alarm_handler(signum, frame):
-            raise TimeoutError
-        prev_handler = signal.getsignal(signal.SIGALRM)
-        signal.signal(signal.SIGALRM, _alarm_handler)
-        signal.alarm(timeout)
-        try:
-            ans = input(f"Alimentation perdue. Arrêter la machine ? [Y/n] (auto-YES dans {timeout}s): ").strip().lower()
-            signal.alarm(0)
-            signal.signal(signal.SIGALRM, prev_handler)
-            if ans in ('', 'y', 'yes', 'o', 'oui'):
+        env = {'DISPLAY': gui_display, 'XAUTHORITY': gui_xauth, 'XDG_RUNTIME_DIR': f'/run/user/{gui_uid}' if gui_uid else None}
+        res = _run_as_user(gui_user, env, cmd)
+        if res is not None:
+            rc = res.returncode
+            if _is_yes_rc(rc, 'yad'):
+                return True
+            if rc in (252,5):
+                logging.info("yad timeout -> considérer comme OUI")
                 return True
             return False
-        except TimeoutError:
-            logging.info("Prompt console timeout -> considérer comme OUI")
-            signal.signal(signal.SIGALRM, prev_handler)
-            return True
-        except EOFError:
-            logging.info("Pas de stdin disponible -> considérer comme OUI")
-            signal.signal(signal.SIGALRM, prev_handler)
-            return True
-    finally:
+
+    # 2) zenity
+    zenity = shutil.which('zenity')
+    if zenity and gui_user:
+        cmd = [zenity, '--question', '--title', 'Alimentation perdue',
+               '--text', 'Alimentation secteur perdue. Arrêter la machine ?',
+               '--ok-label', 'Oui', '--cancel-label', 'Non', '--timeout', str(timeout)]
+        env = {'DISPLAY': gui_display, 'XAUTHORITY': gui_xauth, 'XDG_RUNTIME_DIR': f'/run/user/{gui_uid}' if gui_uid else None}
+        res = _run_as_user(gui_user, env, cmd)
+        if res is not None:
+            rc = res.returncode
+            if _is_yes_rc(rc, 'zenity'):
+                return True
+            if rc in (5,):
+                logging.info("zenity timeout -> considérer comme OUI")
+                return True
+            return False
+
+    # If no GUI session detected, fallback to console prompt only if interactive
+    if sys.stdin.isatty():
+        logging.info("Aucun affichage graphique trouvé -> fallback console interactif")
         try:
-            signal.alarm(0)
-        except Exception:
-            pass
+            def _alarm_handler(signum, frame):
+                raise TimeoutError
+            prev_handler = signal.getsignal(signal.SIGALRM)
+            signal.signal(signal.SIGALRM, _alarm_handler)
+            signal.alarm(timeout)
+            try:
+                ans = input(f"Alimentation perdue. Arrêter la machine ? [Y/n] (auto-YES dans {timeout}s): ").strip().lower()
+                signal.alarm(0)
+                signal.signal(signal.SIGALRM, prev_handler)
+                return ans in ('', 'y', 'yes', 'o', 'oui')
+            except TimeoutError:
+                logging.info("Prompt console timeout -> considérer comme OUI")
+                signal.signal(signal.SIGALRM, prev_handler)
+                return True
+            except EOFError:
+                logging.info("Pas de stdin disponible -> annulation (pas d'auto-YES)")
+                signal.signal(signal.SIGALRM, prev_handler)
+                return False
+        finally:
+            try:
+                signal.alarm(0)
+            except Exception:
+                pass
+
+    logging.warning("Aucun utilisateur graphique détecté et stdin non interactif -> prompt impossible, annulation")
+    return False
 
 def main():
     logging.info("Démarrage ups_monitor (LOG_FILE=%s, ALLOW_SHUTDOWN=%s)", LOG_FILE, ALLOW_SHUTDOWN)
@@ -416,8 +386,7 @@ ExecStart=/usr/bin/python3 /usr/local/bin/ups_monitor.py
 Restart=on-failure
 RestartSec=5
 User=root
-# Pour autoriser l'extinction automatiquement via le service, décommentez et mettez =1 :
-Environment=UPM_ALLOW_SHUTDOWN=1
+# Environment=UPM_ALLOW_SHUTDOWN=1   # disabled by default - enable explicitly if you want auto shutdown
 StandardOutput=journal
 StandardError=journal
 
