@@ -412,6 +412,7 @@ Description=UPS Monitor (UPS Shield X1200/X1201/X1202)
 After=multi-user.target
 
 [Service]
+Environment=UPM_ALLOW_SHUTDOWN=1
 Type=simple
 ExecStart=/usr/bin/python3 /usr/local/bin/ups_monitor.py
 Restart=on-failure
