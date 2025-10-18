@@ -235,24 +235,21 @@ def _run_as_user(user, env_vars, cmd):
         logging.exception("Erreur exécution commande en tant que user %s", user)
         return None
 
-def prompt_shutdown_confirmation(timeout=30, power_check=None, poll_interval=0.25):
+def prompt_shutdown_confirmation(timeout=PROMPT_TIMEOUT, power_check=None, poll_interval=0.25):
     """
     Retourne True pour confirmer l'arrêt (Oui), False sinon.
     power_check: callable() -> True si secteur OK.
-    Cette version lance le dialog en background et vérifie power_check périodiquement :
-    si le secteur revient, le dialog est tué et la fonction retourne False.
+    GUI: si timeout==0 la fenêtre reste ouverte jusqu'à réponse (mais sera tuée si secteur revient).
+    Console: timeout>0 => auto-YES, timeout==0 => attente indéfinie (si interactive).
     """
     logging.info("Affichage du prompt de confirmation (timeout=%ss)", timeout)
     gui_user, gui_display, gui_xauth, gui_uid = get_active_gui_session()
     logging.debug("Session graphique détectée: user=%s display=%s xauth=%s uid=%s", gui_user, gui_display, gui_xauth, gui_uid)
 
-    # helper to interpret return codes
-    def _is_yes_rc(rc, tool):
-        if tool == 'yad':
-            return rc == 0
-        if tool == 'zenity':
-            return rc == 0
-        return False
+    def _safety_deadline(start):
+        if timeout and timeout > 0:
+            return start + timeout + 5
+        return None
 
     # 1) yad (préféré) - design tactile: gros texte, gros boutons, undecorated
     yad = shutil.which('yad')
@@ -265,15 +262,18 @@ def prompt_shutdown_confirmation(timeout=30, power_check=None, poll_interval=0.2
             '--button=Rester allumé:1',
             '--button=Éteindre:0',
             '--on-top', '--center',
-            '--timeout', str(timeout),
             '--borders=20',
             '--fontname=Sans Bold 36',
             '--undecorated'
         ]
+        # n'ajouter --timeout pour GUI si timeout==0 => la fenêtre reste ouverte
+        if timeout and timeout > 0:
+            cmd += ['--timeout', str(timeout)]
         env = {'DISPLAY': gui_display, 'XAUTHORITY': gui_xauth, 'XDG_RUNTIME_DIR': f'/run/user/{gui_uid}' if gui_uid else None}
         proc = _popen_as_user(gui_user, env, cmd)
         if proc:
             start = time.time()
+            deadline = _safety_deadline(start)
             try:
                 while True:
                     # si secteur revenu, kill dialog et annuler
@@ -293,8 +293,9 @@ def prompt_shutdown_confirmation(timeout=30, power_check=None, poll_interval=0.2
                             logging.info("Dialog yad timeout -> considérer comme OUI")
                             return True
                         return False
-                    if time.time() - start > (timeout + 5):
-                        logging.info("Dialog exceeded timeout -> considérer comme OUI")
+                    # si on a une deadline, la respecter ; sinon laisser la fenêtre ouverte
+                    if deadline and time.time() > deadline:
+                        logging.info("Dialog exceeded safety deadline -> considérer comme OUI")
                         try:
                             proc.kill()
                         except Exception:
@@ -315,13 +316,15 @@ def prompt_shutdown_confirmation(timeout=30, power_check=None, poll_interval=0.2
             zenity, '--question',
             '--title', 'Alimentation perdue',
             '--text', 'Alimentation secteur perdue. Arrêter la machine ?',
-            '--ok-label', 'Éteindre', '--cancel-label', 'Rester allumé',
-            '--timeout', str(timeout)
+            '--ok-label', 'Éteindre', '--cancel-label', 'Rester allumé'
         ]
+        if timeout and timeout > 0:
+            cmd += ['--timeout', str(timeout)]
         env = {'DISPLAY': gui_display, 'XAUTHORITY': gui_xauth, 'XDG_RUNTIME_DIR': f'/run/user/{gui_uid}' if gui_uid else None}
         proc = _popen_as_user(gui_user, env, cmd)
         if proc:
             start = time.time()
+            deadline = _safety_deadline(start)
             try:
                 while True:
                     if power_check and power_check():
@@ -340,8 +343,8 @@ def prompt_shutdown_confirmation(timeout=30, power_check=None, poll_interval=0.2
                             logging.info("Dialog zenity timeout -> considérer comme OUI")
                             return True
                         return False
-                    if time.time() - start > (timeout + 5):
-                        logging.info("Dialog exceeded timeout -> considérer comme OUI")
+                    if deadline and time.time() > deadline:
+                        logging.info("Dialog exceeded safety deadline -> considérer comme OUI")
                         try:
                             proc.kill()
                         except Exception:
@@ -355,31 +358,37 @@ def prompt_shutdown_confirmation(timeout=30, power_check=None, poll_interval=0.2
                 except Exception:
                     pass
 
-    # 3) console fallback: if interactive, use alarm (timeout => YES). If no TTY, do NOT auto-YES.
+    # 3) console fallback: si TTY -> comportement précédent (timeout==0 => attente)
     if sys.stdin.isatty():
         logging.info("Aucun affichage graphique -> prompt console (interactive)")
         try:
             def _alarm_handler(signum, frame):
                 raise TimeoutError
-            prev = signal.getsignal(signal.SIGALRM)
-            signal.signal(signal.SIGALRM, _alarm_handler)
-            signal.alarm(timeout)
+            prev = signal.getsignal(signal.SIGALRM')
+            # si timeout>0 utiliser alarm, sinon blocage indéfini
+            if timeout and timeout > 0:
+                signal.signal(signal.SIGALRM, _alarm_handler)
+                signal.alarm(timeout)
             try:
-                ans = input(f"Alimentation perdue. Arrêter la machine ? [Y/n] (auto-YES dans {timeout}s): ").strip().lower()
-                signal.alarm(0)
-                signal.signal(signal.SIGALRM, prev)
+                ans = input(f"Alimentation perdue. Arrêter la machine ? [Y/n] " + (f"(auto-YES dans {timeout}s): " if timeout and timeout > 0 else "(réponse requise): ")).strip().lower()
+                if timeout and timeout > 0:
+                    signal.alarm(0)
+                    signal.signal(signal.SIGALRM, prev)
                 return ans in ('', 'y', 'yes', 'o', 'oui')
             except TimeoutError:
                 logging.info("Prompt console timeout -> considérer comme OUI")
-                signal.signal(signal.SIGALRM, prev)
+                if timeout and timeout > 0:
+                    signal.signal(signal.SIGALRM, prev)
                 return True
             except EOFError:
                 logging.info("Pas de stdin -> annulation")
-                signal.signal(signal.SIGALRM, prev)
+                if timeout and timeout > 0:
+                    signal.signal(signal.SIGALRM, prev)
                 return False
         finally:
             try:
-                signal.alarm(0)
+                if timeout and timeout > 0:
+                    signal.alarm(0)
             except Exception:
                 pass
 
@@ -479,6 +488,15 @@ def main():
             time.sleep(DEBOUNCE_SEC)
             try:
                 if line.get_value() != 1:
+                    # si l'utilisateur a snoozé (choisi "rester allumé"), ne pas réafficher le prompt tant que secteur pas revenu
+                    if snoozed_until_restore:
+                        logging.info("Prompts en pause (utilisateur a choisi de rester allumé) — attente retour secteur.")
+                        # boucle d'attente légère jusqu'au retour secteur
+                        while line.get_value() != 1:
+                            time.sleep(CHECK_INTERVAL)
+                        # au retour secteur la variable sera remise à False en tête de boucle
+                        continue
+
                     logging.info("Perte secteur confirmée, attente pré-prompt %ss", PRE_PROMPT_SEC)
                     # courte temporisation avant popup pour confirmer état (annule si secteur revient)
                     t0 = time.time()
