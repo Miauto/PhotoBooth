@@ -50,6 +50,7 @@ CHIP_NAME = 'gpiochip4'
 DEBOUNCE_SEC = 10    # attendre 10s pour confirmer la coupure
 CHECK_INTERVAL = 0.2 # pause en fonctionnement normal
 PROMPT_TIMEOUT = 30  # secondes pour la popup (timeout = OUI)
+PRE_PROMPT_SEC = 5   # temporisation avant d'afficher le prompt (évite popups instantanés)
 
 # Mode de test / autorisation d'extinction
 ALLOW_SHUTDOWN = False           # mettre True pour réellement appeler 'shutdown'
@@ -200,10 +201,26 @@ def get_active_gui_session():
 
     return (None, None, None, None)
 
+def _popen_as_user(user, env_vars, cmd):
+    """
+    Lance cmd (list) en tant que user via sudo -u -H env ..., retourne subprocess.Popen ou None.
+    """
+    env_args = []
+    for k, v in (env_vars or {}).items():
+        if v is None:
+            continue
+        env_args.append(f"{k}={v}")
+    full = ['sudo', '-u', user, '-H', 'env'] + env_args + cmd
+    logging.debug("Popen pour l'utilisateur graphique: %s", shlex.join(full))
+    try:
+        return subprocess.Popen(full)
+    except Exception:
+        logging.exception("Erreur Popen en tant que user %s", user)
+        return None
+
 def _run_as_user(user, env_vars, cmd):
     """
-    Lance cmd (list) en tant que user via sudo -u -H, injecte env_vars.
-    Retourne subprocess.CompletedProcess ou None si erreur.
+    Lance cmd (list) en tant que user via sudo -u -H env..., retourne CompletedProcess ou None.
     """
     env_args = []
     for k, v in (env_vars or {}).items():
@@ -218,13 +235,12 @@ def _run_as_user(user, env_vars, cmd):
         logging.exception("Erreur exécution commande en tant que user %s", user)
         return None
 
-def prompt_shutdown_confirmation(timeout=30):
+def prompt_shutdown_confirmation(timeout=30, power_check=None, poll_interval=0.25):
     """
     Retourne True pour confirmer l'arrêt (Oui), False sinon.
-    Essaie yad puis zenity dans la session graphique active si détectée.
-    Si aucune session graphique : si stdin est un TTY affiche prompt console avec timeout,
-    sinon NE PAS auto-YES (retour False).
-    Timeout est interprété comme OUI pour les dialogs graphiques et console.
+    power_check: callable() -> True si secteur OK.
+    Cette version lance le dialog en background et vérifie power_check périodiquement :
+    si le secteur revient, le dialog est tué et la fonction retourne False.
     """
     logging.info("Affichage du prompt de confirmation (timeout=%ss)", timeout)
     gui_user, gui_display, gui_xauth, gui_uid = get_active_gui_session()
@@ -238,66 +254,128 @@ def prompt_shutdown_confirmation(timeout=30):
             return rc == 0
         return False
 
-    # 1) yad (préféré)
+    # 1) yad (préféré) - design tactile: gros texte, gros boutons, undecorated
     yad = shutil.which('yad')
     if yad and gui_user:
+        text = "<span face='Sans' size='xx-large'><b>Alimentation secteur perdue\n\nArrêter la machine ?</b></span>"
         cmd = [
-            yad, '--width=480', '--height=160',
+            yad,
+            '--title', 'Alimentation perdue',
+            '--text', text,
+            '--button=Rester allumé:1',
+            '--button=Éteindre:0',
+            '--on-top', '--center',
+            '--timeout', str(timeout),
+            '--borders=20',
+            '--fontname=Sans Bold 36',
+            '--undecorated'
+        ]
+        env = {'DISPLAY': gui_display, 'XAUTHORITY': gui_xauth, 'XDG_RUNTIME_DIR': f'/run/user/{gui_uid}' if gui_uid else None}
+        proc = _popen_as_user(gui_user, env, cmd)
+        if proc:
+            start = time.time()
+            try:
+                while True:
+                    # si secteur revenu, kill dialog et annuler
+                    if power_check and power_check():
+                        logging.info("Secteur revenu pendant prompt -> kill dialog et annuler l'arrêt")
+                        try:
+                            proc.kill()
+                        except Exception:
+                            pass
+                        return False
+                    ret = proc.poll()
+                    if ret is not None:
+                        logging.debug("yad finished rc=%s", ret)
+                        if ret == 0:
+                            return True
+                        if ret in (252, 5):
+                            logging.info("Dialog yad timeout -> considérer comme OUI")
+                            return True
+                        return False
+                    if time.time() - start > (timeout + 5):
+                        logging.info("Dialog exceeded timeout -> considérer comme OUI")
+                        try:
+                            proc.kill()
+                        except Exception:
+                            pass
+                        return True
+                    time.sleep(poll_interval)
+            finally:
+                try:
+                    if proc.poll() is None:
+                        proc.kill()
+                except Exception:
+                    pass
+
+    # 2) zenity fallback (run as user via sudo -u)
+    zenity = shutil.which('zenity')
+    if zenity and gui_user:
+        cmd = [
+            zenity, '--question',
             '--title', 'Alimentation perdue',
             '--text', 'Alimentation secteur perdue. Arrêter la machine ?',
-            '--button=Oui:0', '--button=Non:1',
-            '--on-top', '--center',
+            '--ok-label', 'Éteindre', '--cancel-label', 'Rester allumé',
             '--timeout', str(timeout)
         ]
         env = {'DISPLAY': gui_display, 'XAUTHORITY': gui_xauth, 'XDG_RUNTIME_DIR': f'/run/user/{gui_uid}' if gui_uid else None}
-        res = _run_as_user(gui_user, env, cmd)
-        if res is not None:
-            rc = res.returncode
-            if _is_yes_rc(rc, 'yad'):
-                return True
-            if rc in (252,5):
-                logging.info("yad timeout -> considérer comme OUI")
-                return True
-            return False
+        proc = _popen_as_user(gui_user, env, cmd)
+        if proc:
+            start = time.time()
+            try:
+                while True:
+                    if power_check and power_check():
+                        logging.info("Secteur revenu pendant prompt -> kill dialog et annuler l'arrêt")
+                        try:
+                            proc.kill()
+                        except Exception:
+                            pass
+                        return False
+                    ret = proc.poll()
+                    if ret is not None:
+                        logging.debug("zenity finished rc=%s", ret)
+                        if ret == 0:
+                            return True
+                        if ret in (5,):
+                            logging.info("Dialog zenity timeout -> considérer comme OUI")
+                            return True
+                        return False
+                    if time.time() - start > (timeout + 5):
+                        logging.info("Dialog exceeded timeout -> considérer comme OUI")
+                        try:
+                            proc.kill()
+                        except Exception:
+                            pass
+                        return True
+                    time.sleep(poll_interval)
+            finally:
+                try:
+                    if proc.poll() is None:
+                        proc.kill()
+                except Exception:
+                    pass
 
-    # 2) zenity
-    zenity = shutil.which('zenity')
-    if zenity and gui_user:
-        cmd = [zenity, '--question', '--title', 'Alimentation perdue',
-               '--text', 'Alimentation secteur perdue. Arrêter la machine ?',
-               '--ok-label', 'Oui', '--cancel-label', 'Non', '--timeout', str(timeout)]
-        env = {'DISPLAY': gui_display, 'XAUTHORITY': gui_xauth, 'XDG_RUNTIME_DIR': f'/run/user/{gui_uid}' if gui_uid else None}
-        res = _run_as_user(gui_user, env, cmd)
-        if res is not None:
-            rc = res.returncode
-            if _is_yes_rc(rc, 'zenity'):
-                return True
-            if rc in (5,):
-                logging.info("zenity timeout -> considérer comme OUI")
-                return True
-            return False
-
-    # If no GUI session detected, fallback to console prompt only if interactive
+    # 3) console fallback: if interactive, use alarm (timeout => YES). If no TTY, do NOT auto-YES.
     if sys.stdin.isatty():
-        logging.info("Aucun affichage graphique trouvé -> fallback console interactif")
+        logging.info("Aucun affichage graphique -> prompt console (interactive)")
         try:
             def _alarm_handler(signum, frame):
                 raise TimeoutError
-            prev_handler = signal.getsignal(signal.SIGALRM)
+            prev = signal.getsignal(signal.SIGALRM)
             signal.signal(signal.SIGALRM, _alarm_handler)
             signal.alarm(timeout)
             try:
                 ans = input(f"Alimentation perdue. Arrêter la machine ? [Y/n] (auto-YES dans {timeout}s): ").strip().lower()
                 signal.alarm(0)
-                signal.signal(signal.SIGALRM, prev_handler)
+                signal.signal(signal.SIGALRM, prev)
                 return ans in ('', 'y', 'yes', 'o', 'oui')
             except TimeoutError:
                 logging.info("Prompt console timeout -> considérer comme OUI")
-                signal.signal(signal.SIGALRM, prev_handler)
+                signal.signal(signal.SIGALRM, prev)
                 return True
             except EOFError:
-                logging.info("Pas de stdin disponible -> annulation (pas d'auto-YES)")
-                signal.signal(signal.SIGALRM, prev_handler)
+                logging.info("Pas de stdin -> annulation")
+                signal.signal(signal.SIGALRM, prev)
                 return False
         finally:
             try:
@@ -305,7 +383,7 @@ def prompt_shutdown_confirmation(timeout=30):
             except Exception:
                 pass
 
-    logging.warning("Aucun utilisateur graphique détecté et stdin non interactif -> prompt impossible, annulation")
+    logging.warning("Pas de GUI et pas de TTY -> annulation (pas d'auto-YES)")
     return False
 
 def main():
@@ -395,13 +473,31 @@ def main():
             time.sleep(DEBOUNCE_SEC)
             try:
                 if line.get_value() != 1:
-                    logging.info("Perte secteur confirmée, affichage du prompt de confirmation.")
+                    logging.info("Perte secteur confirmée, attente pré-prompt %ss", PRE_PROMPT_SEC)
+                    # courte temporisation avant popup pour confirmer état (annule si secteur revient)
+                    t0 = time.time()
+                    cancelled = False
+                    while time.time() - t0 < PRE_PROMPT_SEC:
+                        if line.get_value() == 1:
+                            logging.info("Secteur revenu pendant pré-prompt -> annulation affichage")
+                            cancelled = True
+                            break
+                        time.sleep(0.2)
+                    if cancelled:
+                        continue  # retour à la boucle de surveillance
+
+                    logging.info("Affichage du prompt de confirmation.")
                     print("Perte secteur confirmée, affichage du prompt de confirmation.", file=sys.stderr)
-                    if prompt_shutdown_confirmation(timeout=PROMPT_TIMEOUT):
+                    # la fonction va tuer le dialog si secteur revient
+                    ok = prompt_shutdown_confirmation(timeout=PROMPT_TIMEOUT, power_check=lambda: line.get_value() == 1)
+                    if ok:
                         shutdown_now()
+                        # si shutdown lancé, on peut quitter
+                        break
                     else:
-                        logging.info("Arrêt annulé par l'utilisateur via le prompt.")
-                    break
+                        logging.info("Utilisateur a choisi de rester allumé ou prompt annulé. Continuer la surveillance.")
+                        # ne pas break : continuer la surveillance et reposer la question lors d'une nouvelle coupure
+                        continue
                 else:
                     logging.info("Faux positif: alimentation revenue pendant le debounce.")
             except Exception as e:
