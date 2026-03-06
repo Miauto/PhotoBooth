@@ -1,0 +1,10 @@
+[Unit]
+Description=Timer for watch_print_disable.service (every 30s)
+
+[Timer]
+OnUnitActiveSec=30
+AccuracySec=1s
+Unit=watch_print_disable.service
+
+[Install]
+WantedBy=timers.target

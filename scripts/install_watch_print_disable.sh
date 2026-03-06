@@ -65,6 +65,7 @@ fi
 BASH
 chmod 0755 "${DEST_SCRIPT}"
 
+# install a oneshot service unit (timer will trigger it periodically)
 echo "Installation du fichier service -> ${UNIT_FILE}"
 cat > "${UNIT_FILE}" <<'UNIT'
 [Unit]
@@ -75,9 +76,6 @@ Requires=cups.service
 [Service]
 Type=oneshot
 ExecStart=/usr/local/bin/watch_print_disable.sh
-# Surveillance toutes les 30 secondes en cas de succès ou d'erreur
-Restart=always
-RestartSec=30
 # Exécuter en root pour accéder à CUPS
 User=root
 # Écrire sortie dans le fichier de logs
@@ -89,19 +87,38 @@ StandardInput=null
 WantedBy=multi-user.target
 UNIT
 
+# create a timer unit for periodic execution
+TIMER_FILE=/etc/systemd/system/${SERVICE_NAME}.timer
+
+echo "Installation du timer -> ${TIMER_FILE}"
+cat > "${TIMER_FILE}" <<'TIMER'
+[Unit]
+Description=Timer for ${SERVICE_NAME}.service (every 30s)
+
+[Timer]
+OnUnitActiveSec=30
+AccuracySec=1s
+Unit=${SERVICE_NAME}.service
+
+[Install]
+WantedBy=timers.target
+TIMER
+
 echo "Rechargement de systemd..."
 systemctl daemon-reload
 
-echo "Activation du service..."
+echo "Activation du service & du timer..."
 systemctl enable ${SERVICE_NAME}.service
+systemctl enable ${SERVICE_NAME}.timer
 
-echo "Lancement du service..."
-systemctl start ${SERVICE_NAME}.service
+echo "Démarrage du timer (le service sera lancé automatiquement toutes les 30s)..."
+systemctl start ${SERVICE_NAME}.timer
 
 echo "✓ Installation terminée!"
 echo ""
 echo "Vérifier le statut :"
-echo "  systemctl status ${SERVICE_NAME}"
+echo "  systemctl status ${SERVICE_NAME}.service"
+echo "  systemctl status ${SERVICE_NAME}.timer"
 echo ""
 echo "Voir les logs :"
-echo "  journalctl -u ${SERVICE_NAME} -f"
+echo "  journalctl -u ${SERVICE_NAME}.service -f"

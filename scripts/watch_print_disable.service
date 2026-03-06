@@ -6,10 +6,7 @@ Requires=cups.service
 [Service]
 Type=oneshot
 ExecStart=/usr/local/bin/watch_print_disable.sh
-# Surveillance toutes les 30 secondes en cas de succès ou d'erreur
-Restart=always
-RestartSec=30
-# Exécuter en root pour accéder à CUPS
+# Aucun redémarrage, un timer déclenchera le service périodiquement
 User=root
 # Écrire sortie dans le fichier de logs
 StandardOutput=journal
