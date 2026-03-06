@@ -43,16 +43,17 @@ get_active_gui_session() {
                 if [[ -z "$display" ]]; then display="$DISPLAY"; fi
                 xauth="/home/$user/.Xauthority"
                 if [[ ! -f "$xauth" ]]; then
-                    xauth="/run/user/$uid/gdm/Xauthority" 2>/dev/null || xauth=""
+                    xauth="/run/user/$uid/.Xauthority" 2>/dev/null || xauth=""
                 fi
-                echo "$user $display $xauth"
+                echo "$user $display $xauth $uid"
                 return 0
             fi
         done < <(loginctl list-sessions --no-legend 2>/dev/null || true)
     fi
     # Fallback
     if [[ -d /home/pi ]]; then
-        echo "pi $DISPLAY /home/pi/.Xauthority"
+        uid=$(id -u pi 2>/dev/null || echo "")
+        echo "pi $DISPLAY /home/pi/.Xauthority $uid"
     fi
 }
 
@@ -90,12 +91,10 @@ if echo "$REASONS" | grep -qE "(media-empty|marker-supply-empty|marker-supply-lo
         USER_NAME=$(echo "$USER_INFO" | cut -d' ' -f1)
         DISPLAY_VAR=$(echo "$USER_INFO" | cut -d' ' -f2)
         XAUTH_FILE=$(echo "$USER_INFO" | cut -d' ' -f3)
-        if [[ -n "$USER_NAME" && -n "$DISPLAY_VAR" ]]; then
-          export DISPLAY="$DISPLAY_VAR"
-          if [[ -f "$XAUTH_FILE" ]]; then
-            export XAUTHORITY="$XAUTH_FILE"
-          fi
-          sudo -u "$USER_NAME" notify-send -t 5000 "Imprimante réactivée" "L'imprimante $PRN a été automatiquement réactivée."
+        USER_UID=$(echo "$USER_INFO" | cut -d' ' -f4)
+        if [[ -n "$USER_NAME" && -n "$DISPLAY_VAR" && -n "$USER_UID" ]]; then
+          DBUS_ADDR="unix:path=/run/user/$USER_UID/bus"
+          su - "$USER_NAME" -c "DISPLAY='$DISPLAY_VAR' XAUTHORITY='$XAUTH_FILE' DBUS_SESSION_BUS_ADDRESS='$DBUS_ADDR' notify-send -t 5000 'Imprimante réactivée' 'L\\'imprimante $PRN a été automatiquement réactivée.'" 2>/dev/null || true
         fi
       fi
     fi
