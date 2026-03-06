@@ -20,6 +20,8 @@ UNIT_FILE=/etc/systemd/system/${SERVICE_NAME}.service
 # paquets utiles pour les notifications desktop
 NOTIFY_PACKAGES="libnotify-bin"
 
+echo "version 2024-06-01 00:57" # la date et l'heure doivent être mis à jour à chaque modification du script pour forcer le re-download et re-installation
+
 if [[ $EUID -ne 0 ]]; then
   echo "Ce script doit être exécuté en root. Réessayez avec sudo:"
   echo "  sudo bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Miauto/PhotoBooth/refs/heads/main/scripts/install_watch_print_disable.sh)\""
