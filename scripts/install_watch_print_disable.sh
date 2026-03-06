@@ -40,7 +40,7 @@ get_active_gui_session() {
                 user=$(echo "$props" | grep '^Name=' | cut -d'=' -f2)
                 uid=$(echo "$props" | grep '^UID=' | cut -d'=' -f2)
                 display=$(echo "$props" | grep '^Display=' | cut -d'=' -f2)
-                if [[ -z "$display" ]]; then display="$DISPLAY"; fi
+                if [[ -z "$display" ]]; then display="${DISPLAY:-:0}"; fi
                 xauth="/home/$user/.Xauthority"
                 if [[ ! -f "$xauth" ]]; then
                     xauth="/run/user/$uid/.Xauthority" 2>/dev/null || xauth=""
@@ -53,7 +53,7 @@ get_active_gui_session() {
     # Fallback
     if [[ -d /home/pi ]]; then
         uid=$(id -u pi 2>/dev/null || echo "")
-        echo "pi $DISPLAY /home/pi/.Xauthority $uid"
+        echo "pi ${DISPLAY:-:0} /home/pi/.Xauthority $uid"
     fi
 }
 
