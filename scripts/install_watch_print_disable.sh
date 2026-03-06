@@ -51,6 +51,7 @@ get_active_gui_session() {
             if [[ "$active" == "yes" ]]; then
                 user=$(echo "$props" | grep '^Name=' | cut -d'=' -f2)
                 uid=$(echo "$props" | grep '^UID=' | cut -d'=' -f2)
+                if [[ -z "$uid" ]]; then uid=$(id -u "$user" 2>/dev/null || echo ""); fi
                 display=$(echo "$props" | grep '^Display=' | cut -d'=' -f2)
                 if [[ -z "$display" ]]; then display="${DISPLAY:-:0}"; fi
                 xauth="/home/$user/.Xauthority"
