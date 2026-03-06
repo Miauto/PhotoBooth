@@ -28,6 +28,34 @@ cat > "${DEST_SCRIPT}" <<'BASH'
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Fonction pour trouver la session GUI active
+get_active_gui_session() {
+    if command -v loginctl >/dev/null 2>&1; then
+        while read -r line; do
+            sess=$(echo "$line" | awk '{print $1}')
+            if [[ -z "$sess" ]]; then continue; fi
+            props=$(loginctl show-session "$sess" --property=Active --property=Display --property=Type --property=Name --property=UID 2>/dev/null || true)
+            active=$(echo "$props" | grep '^Active=' | cut -d'=' -f2)
+            if [[ "$active" == "yes" ]]; then
+                user=$(echo "$props" | grep '^Name=' | cut -d'=' -f2)
+                uid=$(echo "$props" | grep '^UID=' | cut -d'=' -f2)
+                display=$(echo "$props" | grep '^Display=' | cut -d'=' -f2)
+                if [[ -z "$display" ]]; then display="$DISPLAY"; fi
+                xauth="/home/$user/.Xauthority"
+                if [[ ! -f "$xauth" ]]; then
+                    xauth="/run/user/$uid/gdm/Xauthority" 2>/dev/null || xauth=""
+                fi
+                echo "$user $display $xauth"
+                return 0
+            fi
+        done < <(loginctl list-sessions --no-legend 2>/dev/null || true)
+    fi
+    # Fallback
+    if [[ -d /home/pi ]]; then
+        echo "pi $DISPLAY /home/pi/.Xauthority"
+    fi
+}
+
 PRN="${1:-Canon-SELPHY-CP1500}"   # Nom exact de la file CUPS
 
 # Récupère état détaillé
@@ -54,6 +82,23 @@ if echo "$REASONS" | grep -qE "(media-empty|marker-supply-empty|marker-supply-lo
   # Réactiver + réaccepter
   if cupsenable "$PRN" && cupsaccept "$PRN"; then
     logger -t cp1500 "Auto-heal: réactivation OK pour '$PRN'"
+    # Notification à l'utilisateur
+    if command -v notify-send >/dev/null 2>&1; then
+      # Trouver la session utilisateur active
+      USER_INFO=$(get_active_gui_session)
+      if [[ -n "$USER_INFO" ]]; then
+        USER_NAME=$(echo "$USER_INFO" | cut -d' ' -f1)
+        DISPLAY_VAR=$(echo "$USER_INFO" | cut -d' ' -f2)
+        XAUTH_FILE=$(echo "$USER_INFO" | cut -d' ' -f3)
+        if [[ -n "$USER_NAME" && -n "$DISPLAY_VAR" ]]; then
+          export DISPLAY="$DISPLAY_VAR"
+          if [[ -f "$XAUTH_FILE" ]]; then
+            export XAUTHORITY="$XAUTH_FILE"
+          fi
+          sudo -u "$USER_NAME" notify-send -t 5000 "Imprimante réactivée" "L'imprimante $PRN a été automatiquement réactivée."
+        fi
+      fi
+    fi
     exit 0
   else
     logger -t cp1500 "Auto-heal: ERREUR de réactivation pour '$PRN'"

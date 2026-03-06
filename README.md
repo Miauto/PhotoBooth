@@ -28,6 +28,7 @@ Rassemblement d'idées et de schémas pour la conception.
   - [x] ajout d'un script service pour l'extinction en l'absence de tension (10s)
     - installation via script en ligne => "sudo bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Miauto/PhotoBooth/refs/heads/main/scripts/install_aio.sh"
   - [x] allumage a la mise sous tension
+  - [x] Forcé l'usb max
 - [ ] Revoir la gestion d'impression
   - probleme actuel : quand l'imprimante n'a plus de papier ou plus d'encre, alors l'imprimante se desactive sous linux et on est obliger d'aller dans la gestion de l'imprimante pour la reactivé.
 - [ ] Ajout d’un port USB sur une façade
