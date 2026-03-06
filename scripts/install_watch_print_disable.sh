@@ -17,10 +17,22 @@ UNIT_FILE=/etc/systemd/system/${SERVICE_NAME}.service
 # Si l'imprimante est désactivée à cause de consommables (ex: plus de papier), il tente de la réactiver automatiquement.
 # Si elle est désactivée pour une autre raison, il ne fait rien et attend la prochaine vérification.
 
+# paquets utiles pour les notifications desktop
+NOTIFY_PACKAGES="libnotify-bin"
+
 if [[ $EUID -ne 0 ]]; then
   echo "Ce script doit être exécuté en root. Réessayez avec sudo:"
   echo "  sudo bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Miauto/PhotoBooth/refs/heads/main/scripts/install_watch_print_disable.sh)\""
   exit 1
+fi
+
+echo "Tentative d'installation des paquets pour notifications: ${NOTIFY_PACKAGES}"
+if command -v apt-get >/dev/null 2>&1; then
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update -qq
+  apt-get install -y --no-install-recommends ${NOTIFY_PACKAGES}
+else
+  echo "apt-get non disponible — merci d'installer manuellement: ${NOTIFY_PACKAGES}"
 fi
 
 echo "Installation du script WatchPrintDisable -> ${DEST_SCRIPT}"
@@ -84,19 +96,29 @@ if echo "$REASONS" | grep -qE "(media-empty|marker-supply-empty|marker-supply-lo
   if cupsenable "$PRN" && cupsaccept "$PRN"; then
     logger -t cp1500 "Auto-heal: réactivation OK pour '$PRN'"
     # Notification à l'utilisateur
+    logger -t cp1500 "Tentative d'envoi de notification..."
     if command -v notify-send >/dev/null 2>&1; then
       # Trouver la session utilisateur active
       USER_INFO=$(get_active_gui_session)
+      logger -t cp1500 "Session trouvée: '$USER_INFO'"
       if [[ -n "$USER_INFO" ]]; then
         USER_NAME=$(echo "$USER_INFO" | cut -d' ' -f1)
         DISPLAY_VAR=$(echo "$USER_INFO" | cut -d' ' -f2)
         XAUTH_FILE=$(echo "$USER_INFO" | cut -d' ' -f3)
         USER_UID=$(echo "$USER_INFO" | cut -d' ' -f4)
+        logger -t cp1500 "Utilisateur: $USER_NAME, Display: $DISPLAY_VAR, UID: $USER_UID"
         if [[ -n "$USER_NAME" && -n "$DISPLAY_VAR" && -n "$USER_UID" ]]; then
           DBUS_ADDR="unix:path=/run/user/$USER_UID/bus"
-          su - "$USER_NAME" -c "DISPLAY='$DISPLAY_VAR' XAUTHORITY='$XAUTH_FILE' DBUS_SESSION_BUS_ADDRESS='$DBUS_ADDR' notify-send -t 5000 'Imprimante réactivée' 'L\\'imprimante $PRN a été automatiquement réactivée.'" 2>/dev/null || true
+          logger -t cp1500 "Envoi notification avec DBUS: $DBUS_ADDR"
+          su - "$USER_NAME" -c "DISPLAY='$DISPLAY_VAR' XAUTHORITY='$XAUTH_FILE' DBUS_SESSION_BUS_ADDRESS='$DBUS_ADDR' notify-send -t 5000 'Imprimante réactivée' 'L\\'imprimante $PRN a été automatiquement réactivée.'" 2>&1 | logger -t cp1500 || logger -t cp1500 "Erreur notification"
+        else
+          logger -t cp1500 "Variables manquantes pour notification"
         fi
+      else
+        logger -t cp1500 "Aucune session utilisateur trouvée"
       fi
+    else
+      logger -t cp1500 "notify-send non disponible"
     fi
     exit 0
   else
