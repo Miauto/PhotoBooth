@@ -1,0 +1,20 @@
+[Unit]
+Description=Watch Print Disable - Canon SELPHY CP1500 Auto-heal
+After=multi-user.target cups.service
+Requires=cups.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/watch_print_disable.sh
+# Surveillance toutes les 30 secondes en cas de succès ou d'erreur
+Restart=always
+RestartSec=30
+# Exécuter en root pour accéder à CUPS
+User=root
+# Écrire sortie dans le fichier de logs
+StandardOutput=journal
+StandardError=journal
+StandardInput=null
+
+[Install]
+WantedBy=multi-user.target
