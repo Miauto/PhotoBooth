@@ -6,9 +6,7 @@ Requires=cups.service
 [Service]
 Type=oneshot
 ExecStart=/usr/local/bin/watch_print_disable.sh
-# Aucun redémarrage, un timer déclenchera le service périodiquement
 User=root
-# Écrire sortie dans le fichier de logs
 StandardOutput=journal
 StandardError=journal
 StandardInput=null
