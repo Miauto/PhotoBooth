@@ -91,7 +91,8 @@ UNIT
 TIMER_FILE=/etc/systemd/system/${SERVICE_NAME}.timer
 
 echo "Installation du timer -> ${TIMER_FILE}"
-cat > "${TIMER_FILE}" <<'TIMER'
+# the here-doc is unquoted so ${SERVICE_NAME} is expanded into the unit
+cat > "${TIMER_FILE}" <<TIMER
 [Unit]
 Description=Timer for ${SERVICE_NAME}.service (every 30s)
 
@@ -107,7 +108,10 @@ TIMER
 echo "Rechargement de systemd..."
 systemctl daemon-reload
 
-echo "Activation du service & du timer..."
+echo "Désactivation d'une ancienne unité potentielle et activation du service & du timer..."
+# ensure leftover symlinks from previous broken unit are removed
+systemctl disable --now ${SERVICE_NAME}.service || true
+systemctl disable --now ${SERVICE_NAME}.timer || true
 systemctl enable ${SERVICE_NAME}.service
 systemctl enable ${SERVICE_NAME}.timer
 
