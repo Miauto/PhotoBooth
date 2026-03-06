@@ -6,8 +6,12 @@ DEST_SCRIPT=/usr/local/bin/watch_print_disable.sh
 UNIT_FILE=/etc/systemd/system/${SERVICE_NAME}.service
 
 # Usage:
-# sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/Miauto/PhotoBooth/refs/heads/main/scripts/install_watch_print_disable.sh)"
-# Ce script installe un service systemd qui surveille l'état de l'imprimante Canon SELPHY CP1500 via CUPS.
+# cccccccat > "${TIMER_FILE}" <<'TIMER'     # ← quoted here‑doc, variables are *not* expanded
+[Unit]
+Description=Timer for ${SERVICE_NAME}.service (every 30s)
+…
+Unit=${SERVICE_NAME}.service
+TIMER# Ce script installe un service systemd qui surveille l'état de l'imprimante Canon SELPHY CP1500 via CUPS.
 #
 # Voici les commandes utiles après l'installation :
 # systemctl status watch_print_disable
