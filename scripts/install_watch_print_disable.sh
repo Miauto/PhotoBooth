@@ -7,6 +7,7 @@ UNIT_FILE=/etc/systemd/system/${SERVICE_NAME}.service
 
 # Usage:
 # sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/Miauto/PhotoBooth/refs/heads/main/scripts/install_watch_print_disable.sh)"
+# Version: 2026-03-07 01:05
 # Ce script installe un service systemd qui surveille l'état de l'imprimante Canon SELPHY CP1500 via CUPS.
 #
 # Voici les commandes utiles après l'installation :
@@ -20,7 +21,7 @@ UNIT_FILE=/etc/systemd/system/${SERVICE_NAME}.service
 # paquets utiles pour les notifications desktop
 NOTIFY_PACKAGES="libnotify-bin"
 
-echo "version 2024-06-01 00:57" # la date et l'heure doivent être mis à jour à chaque modification du script pour forcer le re-download et re-installation
+echo "version 2026-03-07 01:15" # la date et l'heure doivent être mis à jour à chaque modification du script pour forcer le re-download et re-installation
 
 if [[ $EUID -ne 0 ]]; then
   echo "Ce script doit être exécuté en root. Réessayez avec sudo:"
@@ -113,7 +114,7 @@ if echo "$REASONS" | grep -qE "(media-empty|marker-supply-empty|marker-supply-lo
         if [[ -n "$USER_NAME" && -n "$DISPLAY_VAR" && -n "$USER_UID" ]]; then
           DBUS_ADDR="unix:path=/run/user/$USER_UID/bus"
           logger -t cp1500 "Envoi notification avec DBUS: $DBUS_ADDR"
-          su - "$USER_NAME" -c "DISPLAY='$DISPLAY_VAR' XAUTHORITY='$XAUTH_FILE' DBUS_SESSION_BUS_ADDRESS='$DBUS_ADDR' notify-send -t 5000 'Imprimante réactivée' 'L\\'imprimante $PRN a été automatiquement réactivée.'" 2>&1 | logger -t cp1500 || logger -t cp1500 "Erreur notification"
+          su - "$USER_NAME" -c "DISPLAY='$DISPLAY_VAR' XAUTHORITY='$XAUTH_FILE' DBUS_SESSION_BUS_ADDRESS='$DBUS_ADDR' notify-send -t 5000 \"Imprimante réactivée\" \"L'imprimante $PRN a été automatiquement réactivée.\"" 2>&1 | logger -t cp1500 || logger -t cp1500 "Erreur notification"
         else
           logger -t cp1500 "Variables manquantes pour notification"
         fi
